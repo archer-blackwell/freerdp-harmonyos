@@ -1,0 +1,13 @@
+E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/native-build/zlib/arm64-v8a/CMakeFiles/zlib.dir
+E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/native-build/zlib/arm64-v8a/CMakeFiles/zlibstatic.dir
+E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/native-build/zlib/arm64-v8a/CMakeFiles/example.dir
+E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/native-build/zlib/arm64-v8a/CMakeFiles/minigzip.dir
+E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/native-build/zlib/arm64-v8a/CMakeFiles/example64.dir
+E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/native-build/zlib/arm64-v8a/CMakeFiles/minigzip64.dir
+E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/native-build/zlib/arm64-v8a/CMakeFiles/test.dir
+E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/native-build/zlib/arm64-v8a/CMakeFiles/edit_cache.dir
+E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/native-build/zlib/arm64-v8a/CMakeFiles/rebuild_cache.dir
+E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/native-build/zlib/arm64-v8a/CMakeFiles/list_install_components.dir
+E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/native-build/zlib/arm64-v8a/CMakeFiles/install.dir
+E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/native-build/zlib/arm64-v8a/CMakeFiles/install/local.dir
+E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/native-build/zlib/arm64-v8a/CMakeFiles/install/strip.dir

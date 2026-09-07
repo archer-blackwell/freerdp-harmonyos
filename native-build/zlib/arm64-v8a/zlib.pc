@@ -1,0 +1,13 @@
+prefix=E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/native-install/deps/arm64-v8a/zlib
+exec_prefix=E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/native-install/deps/arm64-v8a/zlib
+libdir=E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/native-install/deps/arm64-v8a/zlib/lib
+sharedlibdir=E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/native-install/deps/arm64-v8a/zlib/lib
+includedir=E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/native-install/deps/arm64-v8a/zlib/include
+
+Name: zlib
+Description: zlib compression library
+Version: 1.3.1
+
+Requires:
+Libs: -L${libdir} -L${sharedlibdir} -lz
+Cflags: -I${includedir}

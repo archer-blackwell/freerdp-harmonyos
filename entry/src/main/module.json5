@@ -55,6 +55,7 @@
         "startWindowIcon": "$media:startIcon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
+        "orientation": "portrait", // 全局固定为竖屏，不跟随传感器
         "backgroundModes": [
           "audioPlayback",
           "dataTransfer"

@@ -1018,6 +1018,9 @@ static UINT rdpsnd_process_connect(rdpsndPlugin* rdpsnd)
 		const char* subsystem;
 		const char* device;
 	} backends[] = {
+#if defined(WITH_OHOS_AUDIO)
+		{ "ohos", "" },
+#endif
 #if defined(WITH_IOSAUDIO)
 		{ "ios", "" },
 #endif

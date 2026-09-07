@@ -64,8 +64,37 @@ struct Index {
       console.error(`${TAG}: Failed to load bookmarks:`, error);
       this.bookmarks = [];
     } finally {
+      if (this.bookmarks.length === 0) {
+        this.seedTestBookmarks();
+      }
       this.isLoading = false;
     }
+  }
+
+  /**
+   * Seed default test bookmarks when no saved connections exist.
+   * Extend by pushing more entries into the returned array.
+   */
+  private seedTestBookmarks(): void {
+    this.bookmarks = this.buildDefaultTestBookmarks();
+    this.saveBookmarks();
+    console.info(`${TAG}: Seeded ${this.bookmarks.length} test bookmark(s)`);
+  }
+
+  /**
+   * Default test connection data (extensible list).
+   */
+  private buildDefaultTestBookmarks(): BookmarkBase[] {
+    const list: BookmarkBase[] = [];
+
+    const lenovo = new ManualBookmark();
+    lenovo.username = 'Lenovo';
+    lenovo.hostname = '172.16.42.207';
+    lenovo.port = 3389;
+    lenovo.password = '123456abc';
+    list.push(lenovo);
+
+    return list;
   }
 
   /**

@@ -17,11 +17,17 @@
 #include <errno.h>
 #include <locale.h>
 #include <mutex>
+#include <sys/mman.h>
+#include <poll.h>
+#include <unistd.h>
 
 #ifdef OHOS_PLATFORM
 #include <hilog/log.h>
 #include <time.h>
 #include <winpr/sysinfo.h>
+#include <winpr/wlog.h>
+#include <freerdp/client/disp.h>
+#include <native_window/external_window.h>
 #ifdef LOG_TAG
 #undef LOG_TAG
 #endif
@@ -35,6 +41,29 @@
 static uint8_t* g_external_buffer = nullptr;
 static size_t g_external_buffer_size = 0;
 static std::mutex g_external_buffer_mutex;
+
+/* XComponent NativeWindow 渲染相关 */
+static OHNativeWindow* g_nativeWindow = nullptr;
+static std::mutex g_nativeWindow_mutex;
+static void* g_mappedAddr = nullptr;
+static size_t g_mappedSize = 0;
+
+/* Viewport transform: scale + top-left offset (px) applied to RDP framebuffer */
+static float g_viewportScale = 1.0f;
+static float g_viewportOffsetX = 0.0f;
+static float g_viewportOffsetY = 0.0f;
+
+/* Display mode: FIT (aspect-fit letterbox) or FILL (stretch to full screen, default) */
+static int g_displayMode = HARMONYOS_DISPLAY_MODE_FILL;
+
+/* Display Control (disp) dynamic channel context for desktop resize on rotation.
+ * g_dispOwner 记录该上下文归属的 freerdp 实例：旧实例 teardown 未完成时新实例
+ * 已连接的场景下，拒绝陈旧实例的请求，避免跨实例使用已释放的通道上下文。 */
+static DispClientContext* g_dispContext = NULL;
+static freerdp* g_dispOwner = NULL;
+
+/* Active render context for on-demand redraw (gesture/rotation) */
+static rdpContext* g_activeContext = nullptr;
 
 /* OHOS/musl 兼容: GetTickCount64 替代实现 */
 #if !defined(_WIN32)
@@ -58,6 +87,11 @@ static inline UINT64 GetTickCount64_compat(void) {
 #endif
 
 #define TAG "FreeRDP.HarmonyOS"
+
+/* Forward declarations for internal functions defined later in this file */
+static bool freerdp_harmonyos_render_to_surface(rdpContext* context, int x1, int y1, int width, int height);
+static bool freerdp_harmonyos_render_to_surface_unlocked(rdpContext* context);
+static void freerdp_harmonyos_release_surface_unlocked(void);
 
 /* Global callback pointers */
 static OnConnectionSuccessCallback g_onConnectionSuccess = nullptr;
@@ -177,6 +211,11 @@ static void harmonyos_OnChannelConnectedEventHandler(void* context, const Channe
     if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) == 0) {
         // TODO: Initialize clipboard
         LOGI("Clipboard channel connected");
+    } else if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0) {
+        g_dispContext = (DispClientContext*)e->pInterface;
+        g_dispOwner = ((rdpContext*)context)->instance;
+        LOGI("DisplayControl channel connected: %p (owner=%p)",
+             (void*)g_dispContext, (void*)g_dispOwner);
     } else {
         freerdp_client_OnChannelConnectedEventHandler(context, e);
     }
@@ -196,6 +235,13 @@ static void harmonyos_OnChannelDisconnectedEventHandler(void* context, const Cha
     if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) == 0) {
         // TODO: Uninitialize clipboard
         LOGI("Clipboard channel disconnected");
+    } else if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0) {
+        LOGI("DisplayControl channel disconnected");
+        /* 仅当断开者与当前归属一致时清理，避免旧实例迟到的事件清掉新实例的上下文 */
+        if (g_dispOwner == ((rdpContext*)context)->instance) {
+            g_dispContext = NULL;
+            g_dispOwner = NULL;
+        }
     } else {
         freerdp_client_OnChannelDisconnectedEventHandler(context, e);
     }
@@ -260,18 +306,13 @@ static BOOL harmonyos_end_paint(rdpContext* context) {
     }
 
     /* 
-     * ANDROID-STYLE END_PAINT: 
-     * Do NOT perform memcpy in native thread - this causes crashes!
-     * Following Android implementation: just notify ArkTS of the update region.
-     * ArkTS will handle the actual graphics data copy in its own thread.
-     * 
-     * This avoids:
-     * 1. Thread safety issues with ArrayBuffer access
-     * 2. Potential race conditions with PixelMap lifecycle
-     * 3. Native thread blocking on complex memory operations
+     * RENDERING STRATEGY:
+     * 1. If NativeWindow (XComponent surface) is available, render directly to it.
+     *    This is the fastest path - no data copy to ArkTS, no PixelMap overhead.
+     * 2. If no NativeWindow, fall back to ArkTS callback (g_onGraphicsUpdate).
+     *    ArkTS will call getFrameBuffer() to copy data to PixelMap.
      */
     
-    // Debug log (only first 5 frames)
     static int frameCount = 0;
     if (frameCount < 5) {
         LOGI("harmonyos_end_paint: frame=%d, region=[%d,%d,%d,%d], gdi=%dx%d", 
@@ -279,15 +320,14 @@ static BOOL harmonyos_end_paint(rdpContext* context) {
         frameCount++;
     }
     
-    /* 
-     * TODO: Re-enable g_onGraphicsUpdate once we implement Android-style
-     * graphics copy in ArkTS layer (using a dedicated N-API getter function)
-     */
-    // if (g_onGraphicsUpdate) {
-    //     g_onGraphicsUpdate((int64_t)(uintptr_t)context->instance, x1, y1, x2 - x1, y2 - y1);
-    // }
+    /* Try direct NativeWindow rendering first */
+    g_activeContext = context;
+    bool rendered = freerdp_harmonyos_render_to_surface(context, x1, y1, x2 - x1, y2 - y1);
     
-    LOGD("harmonyos_end_paint: Graphics update region calculated, memcpy skipped (Android-style)");
+    /* Fall back to ArkTS callback if NativeWindow not available */
+    if (!rendered && g_onGraphicsUpdate) {
+        g_onGraphicsUpdate((int64_t)(uintptr_t)context->instance, x1, y1, x2 - x1, y2 - y1);
+    }
 
     hwnd->invalid->null = TRUE;
     hwnd->ninvalid = 0;
@@ -295,17 +335,58 @@ static BOOL harmonyos_end_paint(rdpContext* context) {
 }
 
 static BOOL harmonyos_desktop_resize(rdpContext* context) {
+    rdpSettings* settings;
+
     /* 安全检查 - 不使用 WINPR_ASSERT 避免 abort */
-    if (!context || !context->settings || !context->instance) {
+    if (!context || !context->instance) {
         LOGE("harmonyos_desktop_resize: invalid context");
         return FALSE;
     }
 
+    /* [闪退修复] settings 指针单次读取后再判空使用：teardown 竞态下 context
+     * 内存可能被并发释放/清零，若先检查 context->settings 再通过 context 重复
+     * 取址（TOCTOU），相邻两次读取之间被置空会让 freerdp_settings_get_uint32
+     * 命中 WINPR_ASSERT(settings) 直接 abort。 */
+    settings = context->settings;
+    if (!settings) {
+        LOGE("harmonyos_desktop_resize: settings is NULL");
+        return FALSE;
+    }
+
+    /*
+     * [画面修复] GDI 帧缓冲必须跟随服务器分辨率重建（对齐 X11 客户端
+     * xf_sw_desktop_resize 的标准做法）。此前只上报回调不重建 GDI，
+     * gdi->primary_buffer 仍是旧尺寸：横屏 2776x1130 的帧被裁剪进
+     * 1224x2776 的缓冲，导致只显示左半边画面。
+     * 持有渲染互斥锁执行：gdi_resize 会释放旧 primary_buffer，而 UI 线程
+     * （set_viewport → render_to_surface）可能并发读取该缓冲，不加锁会
+     * 读到已释放内存（UAF）。render 回调与本回调同线程顺序执行，无死锁。
+     */
+    rdpGdi* gdi = context->gdi;
+    if (gdi) {
+        const UINT32 newWidth = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
+        const UINT32 newHeight = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
+        {
+            std::lock_guard<std::mutex> lock(g_nativeWindow_mutex);
+            if (!gdi_resize(gdi, newWidth, newHeight)) {
+                LOGE("harmonyos_desktop_resize: gdi_resize to %ux%u failed",
+                     (unsigned)newWidth, (unsigned)newHeight);
+                return FALSE;
+            }
+            /* 新缓冲清零：服务器整屏重绘到达前避免闪现旧内容/未初始化数据 */
+            if (gdi->primary_buffer && gdi->stride > 0 && gdi->height > 0) {
+                memset(gdi->primary_buffer, 0, (size_t)gdi->stride * (size_t)gdi->height);
+            }
+        }
+        LOGI("harmonyos_desktop_resize: gdi buffer resized to %ux%u",
+             (unsigned)newWidth, (unsigned)newHeight);
+    }
+
     if (g_onGraphicsResize) {
         g_onGraphicsResize((int64_t)(uintptr_t)context->instance,
-            freerdp_settings_get_uint32(context->settings, FreeRDP_DesktopWidth),
-            freerdp_settings_get_uint32(context->settings, FreeRDP_DesktopHeight),
-            freerdp_settings_get_uint32(context->settings, FreeRDP_ColorDepth));
+            freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth),
+            freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight),
+            freerdp_settings_get_uint32(settings, FreeRDP_ColorDepth));
     }
     return TRUE;
 }
@@ -338,11 +419,30 @@ static BOOL harmonyos_pre_connect(freerdp* instance) {
 
     LOGI("harmonyos_pre_connect: Settings validated, proceeding...");
 
-    /* 
+    /*
      * 注意：移除了对 settings 字符串的手动提取和打印。
      * 在某些 FreeRDP 版本中，如果在 pre_connect 阶段 settings 尚未完全同步，
      * 访问这些字段可能导致不稳定的行为甚至崩溃。
      */
+
+    /*
+     * [闪退修复] 强制同步静态/动态通道。
+     * 崩溃栈（SIGABRT @ drdynvc_virtual_channel_client_thread）表明 drdynvc 以
+     * 异步模式运行：其 terminated 处理不 join 工作线程，若 context/gdi 在线程
+     * 仍处理迟到 PDU（/dynamic-resolution 的 ResetGraphics）时释放，会以悬空
+     * context 调用 update->DesktopResize → getter 断言 abort。
+     * 同步模式下 PDU 全部在客户端主线程内联处理，teardown 时序由
+     * freerdp_disconnect 保证。pre_connect 是通道加载（utils_reload_channels）
+     * 之前最后的设置点，此处兜底重设并记录运行时实际值。
+     */
+    if (!freerdp_settings_set_bool(settings, FreeRDP_SynchronousStaticChannels, TRUE) ||
+        !freerdp_settings_set_bool(settings, FreeRDP_SynchronousDynamicChannels, TRUE)) {
+        LOGE("harmonyos_pre_connect: failed to enforce synchronous channels");
+        return FALSE;
+    }
+    LOGI("harmonyos_pre_connect: sync channels enforced (static=%d dyn=%d)",
+         freerdp_settings_get_bool(settings, FreeRDP_SynchronousStaticChannels),
+         freerdp_settings_get_bool(settings, FreeRDP_SynchronousDynamicChannels));
 
     rc = PubSub_SubscribeChannelConnected(context->pubSub,
                                           harmonyos_OnChannelConnectedEventHandler);
@@ -494,16 +594,20 @@ static BOOL harmonyos_post_connect(freerdp* instance) {
     update->DesktopResize = harmonyos_desktop_resize;
     LOGI("harmonyos_post_connect: Update callbacks set");
 
-    /* 
-     * CRITICAL: Temporarily bypass ArkTS callbacks to isolate the crash.
-     * The crash occurs immediately after "Update callbacks set" when calling
-     * either g_onSettingsChanged or g_onConnectionSuccess.
-     * 
-     * TODO: Debug TSFN implementation or callback parameters.
-     */
-    LOGI("harmonyos_post_connect: Skipping ArkTS callbacks to test connection stability");
-    
-    LOGI("harmonyos_post_connect: EXIT - connection established (UI not notified)");
+    if (g_onSettingsChanged) {
+        g_onSettingsChanged((int64_t)(uintptr_t)instance,
+                            (int)settings->DesktopWidth,
+                            (int)settings->DesktopHeight,
+                            (int)settings->ColorDepth);
+        LOGI("harmonyos_post_connect: SettingsChanged callback called");
+    }
+
+    if (g_onConnectionSuccess) {
+        g_onConnectionSuccess((int64_t)(uintptr_t)instance);
+        LOGI("harmonyos_post_connect: ConnectionSuccess callback called");
+    }
+
+    LOGI("harmonyos_post_connect: EXIT - connection established");
     return TRUE;
 }
 
@@ -659,18 +763,40 @@ static int harmonyos_freerdp_run(freerdp* instance) {
         }
 
         if (!freerdp_check_event_handles(context)) {
-            LOGE("Failed to check FreeRDP file descriptor");
-            status = GetLastError();
-            break;
+            DWORD checkErr = GetLastError();
+            LOGW("freerdp_check_event_handles failed (error=0x%08X), retrying...", checkErr);
+            
+            int retries = 0;
+            const int MAX_EVENT_RETRIES = 3;
+            BOOL eventOk = FALSE;
+            while (retries < MAX_EVENT_RETRIES) {
+                retries++;
+                Sleep(50);
+                eventOk = freerdp_check_event_handles(context);
+                if (eventOk) {
+                    LOGI("freerdp_check_event_handles recovered on retry %d", retries);
+                    break;
+                }
+            }
+            
+            if (!eventOk) {
+                LOGE("freerdp_check_event_handles failed after %d retries, disconnecting", MAX_EVENT_RETRIES);
+                status = checkErr;
+                break;
+            }
         }
 
         if (freerdp_shall_disconnect_context(instance->context))
             break;
 
         if (harmonyos_check_handle(instance) != TRUE) {
-            LOGE("Failed to check harmonyos file descriptor");
-            status = GetLastError();
-            break;
+            LOGW("harmonyos_check_handle failed, retrying...");
+            Sleep(50);
+            if (harmonyos_check_handle(instance) != TRUE) {
+                LOGE("harmonyos_check_handle failed after retry, disconnecting");
+                status = GetLastError();
+                break;
+            }
         }
     }
 
@@ -919,6 +1045,9 @@ int64_t freerdp_harmonyos_new(void) {
     rdpContext* ctx;
 
     setlocale(LC_ALL, "");
+
+    /* 调试期：开启 WinPR/FreeRDP 内部 DEBUG 日志（transport/TLS/NLA 层诊断信息进 hilog） */
+    WLog_SetLogLevel(WLog_Get(""), WLOG_DEBUG);
     
     /* 初始化 OpenSSL（只需要做一次） */
     if (!g_sslInitialized) {
@@ -965,6 +1094,37 @@ void freerdp_harmonyos_free(int64_t instance) {
         std::lock_guard<std::mutex> lock(g_external_buffer_mutex);
         g_external_buffer = nullptr;
         g_external_buffer_size = 0;
+    }
+
+    if (inst->context) {
+        harmonyosContext* ctx = (harmonyosContext*)inst->context;
+
+        /*
+         * 断开闪退修复：freerdp_client_context_free 之前必须等待客户端线程退出，
+         * 否则线程 teardown（freerdp_disconnect / 通道释放 / rdpsnd 关闭）会与
+         * context 释放产生 use-after-free。正常流程中 ArkTS 层在 onDisconnected
+         * 回调后才调用 free，线程此刻基本已退出，此等待只是兜底（超时 3 秒）。
+         */
+        if (ctx->thread) {
+            freerdp_abort_connect_context(inst->context);
+            DWORD waitResult = WaitForSingleObject(ctx->thread, 3000);
+            if (waitResult != WAIT_OBJECT_0) {
+                LOGE("freerdp_harmonyos_free: client thread not exited in time (0x%08X)", waitResult);
+            }
+            CloseHandle(ctx->thread);
+            ctx->thread = NULL;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_nativeWindow_mutex);
+        g_activeContext = nullptr;
+    }
+
+    /* [闪退修复] 若释放的实例拥有 disp 通道上下文，同步清理防止悬空 */
+    if (g_dispOwner == inst) {
+        g_dispContext = NULL;
+        g_dispOwner = NULL;
     }
 
     if (inst->context) {
@@ -1034,6 +1194,14 @@ bool freerdp_harmonyos_parse_arguments(int64_t instance, const char** args, int 
      */
     freerdp_settings_set_bool(inst->context->settings, FreeRDP_RemoteConsoleAudio, FALSE);
     freerdp_settings_set_bool(inst->context->settings, FreeRDP_AudioPlayback, TRUE);
+    /*
+     * 断开闪退修复：启用同步静态/动态通道处理。
+     * rdpsnd 默认启用 async（rdpsnd_main.c 中 async=TRUE 会创建 play_thread），
+     * 断开时主线程 teardown 与 play_thread 处理音频 PDU 存在竞态。
+     * 同步处理后 rdpsnd 在主线程内联执行，消除该竞态。
+     */
+    freerdp_settings_set_bool(inst->context->settings, FreeRDP_SynchronousStaticChannels, TRUE);
+    freerdp_settings_set_bool(inst->context->settings, FreeRDP_SynchronousDynamicChannels, TRUE);
     freerdp_settings_set_bool(inst->context->settings, FreeRDP_CompressionEnabled, TRUE);
     freerdp_settings_set_bool(inst->context->settings, FreeRDP_FastPathOutput, TRUE);
     
@@ -1794,4 +1962,329 @@ int freerdp_harmonyos_check_connection_status(int64_t instance) {
         return 10; /* Connected, background mode */
     
     return 100; /* Connected, foreground mode */
+}
+
+/* ==================== Frame Snapshot API ==================== */
+
+bool freerdp_harmonyos_get_frame_snapshot_info(int* width, int* height, int* stride) {
+    if (!width || !height || !stride) {
+        LOGE("get_frame_snapshot_info: null output pointer");
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(g_external_buffer_mutex);
+    if (!g_external_buffer || g_external_buffer_size == 0) {
+        LOGW("get_frame_snapshot_info: no external buffer available");
+        *width = 0;
+        *height = 0;
+        *stride = 0;
+        return false;
+    }
+
+    /* Find the active instance to get GDI dimensions.
+     * We scan contexts that have a valid GDI with primary_buffer == g_external_buffer.
+     * Since this is a single-session app, the first valid GDI wins. */
+    freerdp* inst = nullptr;
+    /* Use the global client context list - iterate through known instances.
+     * For single-session, we rely on the fact that update_graphics_buffer
+     * stores the GDI primary buffer pointer. We need to find the instance
+     * that owns this buffer. */
+    /* Since we don't have a global instance registry, we reconstruct dims
+     * from buffer size assuming standard 4-byte pixel format. However,
+     * we cannot determine width/height from size alone without the instance.
+     * Instead, we use a different approach: store GDI info alongside the buffer. */
+
+    /* We need to track the instance that set the external buffer.
+     * For now, return false to indicate snapshot not available via this path.
+     * The NAPI layer should use freerdp_harmonyos_get_frame_buffer(instance, ...)
+     * instead, which has direct access to the GDI. */
+    *width = 0;
+    *height = 0;
+    *stride = 0;
+    LOGW("get_frame_snapshot_info: use get_frame_buffer(instance, ...) instead");
+    return false;
+}
+
+bool freerdp_harmonyos_copy_frame_snapshot(uint8_t* buffer, size_t buffer_size) {
+    if (!buffer || buffer_size == 0) {
+        LOGE("copy_frame_snapshot: invalid buffer");
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(g_external_buffer_mutex);
+    if (!g_external_buffer || g_external_buffer_size == 0) {
+        LOGW("copy_frame_snapshot: no external buffer available");
+        return false;
+    }
+
+    size_t copySize = buffer_size < g_external_buffer_size ? buffer_size : g_external_buffer_size;
+    memcpy(buffer, g_external_buffer, copySize);
+    return true;
+}
+
+bool freerdp_harmonyos_set_surface_id(uint64_t surface_id) {
+    std::lock_guard<std::mutex> lock(g_nativeWindow_mutex);
+    
+    LOGI("set_surface_id: creating NativeWindow from surface_id=%llu",
+         (unsigned long long)surface_id);
+    
+    if (surface_id == 0) {
+        LOGE("set_surface_id: invalid surface_id=0");
+        return false;
+    }
+    
+    if (g_nativeWindow) {
+        LOGW("set_surface_id: releasing previous NativeWindow");
+        freerdp_harmonyos_release_surface_unlocked();
+    }
+    
+    int32_t ret = OH_NativeWindow_CreateNativeWindowFromSurfaceId(surface_id, &g_nativeWindow);
+    if (ret != 0 || !g_nativeWindow) {
+        LOGE("set_surface_id: OH_NativeWindow_CreateNativeWindowFromSurfaceId failed, ret=%d", ret);
+        g_nativeWindow = nullptr;
+        return false;
+    }
+    
+    LOGI("set_surface_id: NativeWindow created successfully, window=%p", (void*)g_nativeWindow);
+    return true;
+}
+
+void freerdp_harmonyos_release_surface_unlocked(void) {
+    g_activeContext = nullptr;
+
+    if (g_mappedAddr && g_mappedSize > 0) {
+        munmap(g_mappedAddr, g_mappedSize);
+        g_mappedAddr = nullptr;
+        g_mappedSize = 0;
+    }
+    
+    if (g_nativeWindow) {
+        OH_NativeWindow_DestroyNativeWindow(g_nativeWindow);
+        g_nativeWindow = nullptr;
+        LOGI("release_surface: NativeWindow destroyed");
+    }
+}
+
+void freerdp_harmonyos_release_surface(void) {
+    std::lock_guard<std::mutex> lock(g_nativeWindow_mutex);
+    freerdp_harmonyos_release_surface_unlocked();
+}
+
+void freerdp_harmonyos_set_viewport(float scale, float offsetX, float offsetY) {
+    std::lock_guard<std::mutex> lock(g_nativeWindow_mutex);
+    g_viewportScale = scale;
+    g_viewportOffsetX = offsetX;
+    g_viewportOffsetY = offsetY;
+
+    if (g_nativeWindow && g_activeContext) {
+        freerdp_harmonyos_render_to_surface_unlocked(g_activeContext);
+    }
+}
+
+bool freerdp_harmonyos_set_display_mode(int mode) {
+    if (mode != HARMONYOS_DISPLAY_MODE_FIT && mode != HARMONYOS_DISPLAY_MODE_FILL) {
+        LOGE("set_display_mode: invalid mode=%d", mode);
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(g_nativeWindow_mutex);
+    if (g_displayMode == mode) {
+        return true;
+    }
+    g_displayMode = mode;
+    LOGI("set_display_mode: mode=%d (%s)", mode,
+         mode == HARMONYOS_DISPLAY_MODE_FILL ? "fill" : "fit");
+
+    if (g_nativeWindow && g_activeContext) {
+        freerdp_harmonyos_render_to_surface_unlocked(g_activeContext);
+    }
+    return true;
+}
+
+int freerdp_harmonyos_get_display_mode(void) {
+    std::lock_guard<std::mutex> lock(g_nativeWindow_mutex);
+    return g_displayMode;
+}
+
+/*
+ * 通过 Display Control (disp) 动态通道请求服务器调整桌面分辨率（旋转/铺满模式跟随屏幕方向）。
+ * 需连接时启用 /dynamic-resolution；服务器不支持时返回 false（业务层保持 letterbox 兜底）。
+ */
+bool freerdp_harmonyos_request_desktop_resize(int64_t instance, int width, int height) {
+    freerdp* inst = (freerdp*)(uintptr_t)instance;
+
+    if (!inst || !inst->context) {
+        LOGE("request_desktop_resize: invalid instance");
+        return false;
+    }
+
+    /* [闪退修复] 仅在连接活跃时发送：断开/释放过程中的迟到请求会触发服务器
+     * ResetGraphics PDU 撞上本地 teardown（异步 drdynvc 线程场景即 UAF 崩溃）。 */
+    if (!freerdp_is_active_state(inst->context)) {
+        LOGW("request_desktop_resize: connection not active");
+        return false;
+    }
+
+    /* [闪退修复] disp 上下文按实例归属校验，拒绝陈旧实例使用新实例的通道 */
+    if (inst != g_dispOwner) {
+        LOGW("request_desktop_resize: instance %p does not own disp context (owner=%p)",
+             (void*)inst, (void*)g_dispOwner);
+        return false;
+    }
+
+    if (!g_dispContext) {
+        LOGW("request_desktop_resize: disp channel not available");
+        return false;
+    }
+
+    if (width < DISPLAY_CONTROL_MIN_MONITOR_WIDTH || width > DISPLAY_CONTROL_MAX_MONITOR_WIDTH ||
+        height < DISPLAY_CONTROL_MIN_MONITOR_HEIGHT || height > DISPLAY_CONTROL_MAX_MONITOR_HEIGHT) {
+        LOGE("request_desktop_resize: size %dx%d out of range", width, height);
+        return false;
+    }
+
+    DISPLAY_CONTROL_MONITOR_LAYOUT layout;
+    memset(&layout, 0, sizeof(layout));
+    layout.Flags = DISPLAY_CONTROL_MONITOR_PRIMARY;
+    layout.Width = (UINT32)width;
+    layout.Height = (UINT32)height;
+
+    UINT rc = g_dispContext->SendMonitorLayout(g_dispContext, 1, &layout);
+    if (rc != CHANNEL_RC_OK) {
+        LOGE("request_desktop_resize: SendMonitorLayout failed rc=%u", (unsigned)rc);
+        return false;
+    }
+
+    LOGI("request_desktop_resize: requested %dx%d", width, height);
+    return true;
+}
+
+/* ==================== NativeWindow Rendering ==================== */
+
+static bool freerdp_harmonyos_render_to_surface(rdpContext* context, int x1, int y1, int width, int height) {
+    (void)x1;
+    (void)y1;
+    (void)width;
+    (void)height;
+    std::lock_guard<std::mutex> lock(g_nativeWindow_mutex);
+    return freerdp_harmonyos_render_to_surface_unlocked(context);
+}
+
+static bool freerdp_harmonyos_render_to_surface_unlocked(rdpContext* context) {
+    if (!g_nativeWindow) {
+        return false;
+    }
+
+    if (!context || !context->gdi || !context->gdi->primary || !context->gdi->primary_buffer) {
+        return false;
+    }
+
+    rdpGdi* gdi = context->gdi;
+    int desktopWidth = (int)gdi->width;
+    int desktopHeight = (int)gdi->height;
+    int srcStride = (int)gdi->stride;
+    uint8_t* srcBuffer = gdi->primary_buffer;
+
+    if (desktopWidth <= 0 || desktopHeight <= 0 || srcStride <= 0) {
+        return false;
+    }
+
+    int releaseFenceFd = -1;
+    OHNativeWindowBuffer* nativeWindowBuffer = nullptr;
+    int32_t ret = OH_NativeWindow_NativeWindowRequestBuffer(g_nativeWindow, &nativeWindowBuffer, &releaseFenceFd);
+    if (ret != 0 || !nativeWindowBuffer) {
+        return false;
+    }
+
+    BufferHandle* bufferHandle = OH_NativeWindow_GetBufferHandleFromNative(nativeWindowBuffer);
+    if (!bufferHandle || bufferHandle->width <= 0 || bufferHandle->height <= 0) {
+        OH_NativeWindow_NativeWindowAbortBuffer(g_nativeWindow, nativeWindowBuffer);
+        return false;
+    }
+
+    if (releaseFenceFd != -1) {
+        struct pollfd pollfds = {};
+        pollfds.fd = releaseFenceFd;
+        pollfds.events = POLLIN;
+        int retCode = -1;
+        do {
+            retCode = poll(&pollfds, 1, 1000);
+        } while (retCode == -1 && (errno == EINTR || errno == EAGAIN));
+        close(releaseFenceFd);
+    }
+
+    void* mappedAddr = mmap(nullptr, bufferHandle->size, PROT_READ | PROT_WRITE, MAP_SHARED, bufferHandle->fd, 0);
+    if (mappedAddr == MAP_FAILED) {
+        OH_NativeWindow_NativeWindowAbortBuffer(g_nativeWindow, nativeWindowBuffer);
+        return false;
+    }
+
+    auto* dst = static_cast<uint8_t*>(mappedAddr);
+    int bufWidth = bufferHandle->width;
+    int bufHeight = bufferHandle->height;
+    int dstStride = bufferHandle->stride;
+
+    /*
+     * Uniform aspect-preserving transform (scale + top-left offset) from the
+     * business layer. FILL ("fullscreen") requests a desktop sized to the
+     * physical screen at connect time (/f + /size:<screen>), so uniform
+     * scaling maps it 1:1 onto the surface without distortion; FIT letterboxes
+     * the bookmarked desktop size. No per-axis stretching in either mode.
+     */
+    float scaleX = g_viewportScale;
+    if (scaleX < 0.01f)
+    {
+        scaleX = 0.01f;
+    }
+    float scaleY = scaleX;
+    float offsetX = g_viewportOffsetX;
+    float offsetY = g_viewportOffsetY;
+
+    /* Draw order: fill the whole canvas black first (letterbox bars). */
+    memset(dst, 0, (size_t)dstStride * (size_t)bufHeight);
+
+    /* Then draw the scaled & offset RDP image (nearest-neighbour). */
+    for (int row = 0; row < bufHeight; row++) {
+        float srcY = ((float)row - offsetY) / scaleY;
+        if (srcY < 0.0f || srcY >= (float)desktopHeight) {
+            continue;
+        }
+        int srcRow = (int)srcY;
+        const uint8_t* srcRowPtr = srcBuffer + (size_t)srcRow * (size_t)srcStride;
+        uint8_t* dstRow = dst + (size_t)row * (size_t)dstStride;
+
+        for (int col = 0; col < bufWidth; col++) {
+            float srcX = ((float)col - offsetX) / scaleX;
+            if (srcX < 0.0f || srcX >= (float)desktopWidth) {
+                continue;
+            }
+            int srcCol = (int)srcX;
+            size_t srcOff = (size_t)srcCol * 4;
+            size_t dstOff = (size_t)col * 4;
+            dstRow[dstOff] = srcRowPtr[srcOff + 2];
+            dstRow[dstOff + 1] = srcRowPtr[srcOff + 1];
+            dstRow[dstOff + 2] = srcRowPtr[srcOff];
+            dstRow[dstOff + 3] = 0xFF;
+        }
+    }
+
+    munmap(mappedAddr, bufferHandle->size);
+
+    Region region = {};
+    Region::Rect* rects = new Region::Rect();
+    rects->x = 0;
+    rects->y = 0;
+    rects->w = bufWidth;
+    rects->h = bufHeight;
+    region.rects = rects;
+    region.rectNumber = 1;
+
+    ret = OH_NativeWindow_NativeWindowFlushBuffer(g_nativeWindow, nativeWindowBuffer, -1, region);
+    delete rects;
+
+    if (ret != 0) {
+        return false;
+    }
+
+    return true;
 }

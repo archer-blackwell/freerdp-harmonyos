@@ -166,6 +166,8 @@ option(USE_VERSION_FROM_GIT_TAG "Extract FreeRDP version from git tag." ON)
 option(WITH_CAIRO "Use CAIRO image library for screen resizing" OFF)
 option(WITH_SWSCALE "Use SWScale image library for screen resizing" ON)
 
+option(WITH_OHOS_AUDIO "Enable sound redirection using OpenHarmony OHAudio" OFF)
+
 if(ANDROID)
   include(ConfigOptionsAndroid)
 endif(ANDROID)

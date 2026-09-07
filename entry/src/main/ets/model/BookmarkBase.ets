@@ -318,6 +318,21 @@ export class BookmarkBase {
       errors.push('主机名不能为空');
     }
 
+    // Allow DNS names, but validate dotted IPv4 literals locally. Without this
+    // check a typo such as 192.268.1.175 reaches FreeRDP as a hostname and is
+    // reported later as the less helpful 0x20005 DNS lookup failure.
+    const hostname = this.hostname.trim();
+    const ipv4Parts = hostname.split('.');
+    if (ipv4Parts.length === 4 && ipv4Parts.every((part: string): boolean => /^\d+$/.test(part))) {
+      const hasInvalidOctet = ipv4Parts.some((part: string): boolean => {
+        const value = Number(part);
+        return value < 0 || value > 255;
+      });
+      if (hasInvalidOctet) {
+        errors.push('IPv4地址格式无效');
+      }
+    }
+
     if (this.port < 1 || this.port > 65535) {
       errors.push('端口号必须在1-65535之间');
     }

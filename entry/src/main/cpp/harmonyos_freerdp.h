@@ -48,6 +48,13 @@ typedef struct {
     void* napi_callback_ref;
 } harmonyosContext;
 
+/* Display mode for XComponent rendering (controlled by business layer) */
+typedef enum {
+    HARMONYOS_DISPLAY_MODE_FIT = 0,   /* 自适应：按书签分辨率请求桌面，等比居中显示（留黑边） */
+    HARMONYOS_DISPLAY_MODE_FILL = 1   /* 铺满全屏：FreeRDP Fullscreen（/f），按屏幕分辨率请求桌面，
+                                          等比 1:1 铺满（不拉伸）；渲染与 FIT 同为等比变换 */
+} HARMONYOS_DISPLAY_MODE;
+
 /* Cursor type definitions */
 #define CURSOR_TYPE_UNKNOWN     0
 #define CURSOR_TYPE_DEFAULT     1   /* 默认箭头 */
@@ -184,6 +191,17 @@ bool freerdp_harmonyos_request_refresh(int64_t instance);
 bool freerdp_harmonyos_request_refresh_rect(int64_t instance, int x, int y, int width, int height);
 bool freerdp_harmonyos_get_frame_buffer(int64_t instance, uint8_t** buffer, 
                                          int* width, int* height, int* stride);
+bool freerdp_harmonyos_copy_frame_buffer(int64_t instance, uint8_t* buffer,
+                                          size_t buffer_size, int* width,
+                                          int* height, int* stride);
+bool freerdp_harmonyos_get_frame_snapshot_info(int* width, int* height, int* stride);
+bool freerdp_harmonyos_copy_frame_snapshot(uint8_t* buffer, size_t buffer_size);
+bool freerdp_harmonyos_set_surface_id(uint64_t surface_id);
+void freerdp_harmonyos_release_surface(void);
+void freerdp_harmonyos_set_viewport(float scale, float offsetX, float offsetY);
+bool freerdp_harmonyos_set_display_mode(int mode);
+int freerdp_harmonyos_get_display_mode(void);
+bool freerdp_harmonyos_request_desktop_resize(int64_t instance, int width, int height);
 
 /* Connection stability monitoring */
 bool freerdp_harmonyos_is_in_background_mode(int64_t instance);

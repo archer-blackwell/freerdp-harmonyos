@@ -48,6 +48,9 @@ export struct SessionView {
   
   // Pixel map for rendering
   @Prop @Watch('onPixelMapChanged') pixelMap: image.PixelMap | null = null;
+  // PixelMap content changes in place, so this version forces ArkUI to create
+  // a fresh Image node and upload the changed texture.
+  @Prop frameVersion: number = 0;
   
   // View state
   @State viewScale: number = 1.0;
@@ -324,7 +327,7 @@ export struct SessionView {
         .width('100%')
         .height('100%')
         .backgroundColor('#1a1a1a')
-      
+
       // Remote desktop canvas
       if (this.pixelMap) {
         Image(this.pixelMap)
@@ -352,14 +355,14 @@ export struct SessionView {
     .onAreaChange((oldValue: Area, newValue: Area) => {
       this.viewWidth = newValue.width as number;
       this.viewHeight = newValue.height as number;
-      
+
       // Initial fit to screen
       if (this.viewScale === 1.0 && this.offsetX === 0 && this.offsetY === 0) {
         this.fitToScreen();
       } else {
         this.constrainOffset();
       }
-      
+
       if (this.listener) {
         this.listener.onSessionViewReady();
       }

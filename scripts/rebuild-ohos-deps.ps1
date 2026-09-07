@@ -1,10 +1,9 @@
-param(
+﻿param(
   [string]$NdkRoot = $env:OHOS_NDK_HOME,
   [string]$Arch = "arm64-v8a",
   [string]$BuildType = "Release",
   [string]$OpenSslVersion = "3.0.15",
   [string]$ZlibVersion = "1.3.1",
-  [string]$CJsonVersion = "1.7.18",
   [switch]$Clean
 )
 
@@ -26,11 +25,6 @@ function Resolve-NdkRoot {
       $candidates += $sdkPath
     }
   }
-
-  $candidates += @(
-    "C:\huawei\Sdk",
-    "C:\Users\Administrator\AppData\Local\Huawei\Sdk"
-  )
 
   foreach ($base in $candidates) {
     if (-not (Test-Path $base)) { continue }
@@ -69,7 +63,7 @@ function Download-IfMissing {
   param([string]$Url, [string]$OutFile)
   if (-not (Test-Path $OutFile)) {
     Write-Host "下载 $Url" -ForegroundColor Cyan
-    Invoke-WebRequest -Uri $Url -OutFile $OutFile
+    Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing
   }
 }
 
@@ -84,35 +78,23 @@ function Expand-Tar {
 Write-Host "=== 构建 zlib ===" -ForegroundColor Cyan
 $zlibArchive = Join-Path $srcRoot "zlib-$ZlibVersion.tar.gz"
 $zlibSrc = Join-Path $srcRoot "zlib-$ZlibVersion"
-Download-IfMissing "https://zlib.net/zlib-$ZlibVersion.tar.gz" $zlibArchive
+Download-IfMissing "https://zlib.net/fossils/zlib-$ZlibVersion.tar.gz" $zlibArchive
 Expand-Tar $zlibArchive $zlibSrc
 
 $zlibBuild = Join-Path $buildRoot "zlib\$Arch"
 New-Item -ItemType Directory -Path $zlibBuild -Force | Out-Null
-cmake -S $zlibSrc -B $zlibBuild -G Ninja `
-  -DCMAKE_TOOLCHAIN_FILE=$toolchain `
-  -DOHOS_ARCH=$Arch `
-  -DCMAKE_BUILD_TYPE=$BuildType `
-  -DCMAKE_INSTALL_PREFIX=$installRoot\zlib
+$zlibArgs = @(
+  "-S", $zlibSrc,
+  "-B", $zlibBuild,
+  "-G", "Ninja",
+  "-DCMAKE_TOOLCHAIN_FILE=$toolchain",
+  "-DOHOS_ARCH=$Arch",
+  "-DCMAKE_BUILD_TYPE=$BuildType",
+  "-DCMAKE_INSTALL_PREFIX=$installRoot\zlib"
+)
+cmake @zlibArgs
 cmake --build $zlibBuild --parallel
 cmake --install $zlibBuild
-
-Write-Host "=== 构建 cJSON ===" -ForegroundColor Cyan
-$cjsonArchive = Join-Path $srcRoot "cjson-$CJsonVersion.tar.gz"
-$cjsonSrc = Join-Path $srcRoot "cjson-$CJsonVersion"
-Download-IfMissing "https://github.com/DaveGamble/cJSON/archive/refs/tags/v$CJsonVersion.tar.gz" $cjsonArchive
-Expand-Tar $cjsonArchive $cjsonSrc
-
-$cjsonBuild = Join-Path $buildRoot "cjson\$Arch"
-New-Item -ItemType Directory -Path $cjsonBuild -Force | Out-Null
-cmake -S $cjsonSrc -B $cjsonBuild -G Ninja `
-  -DCMAKE_TOOLCHAIN_FILE=$toolchain `
-  -DOHOS_ARCH=$Arch `
-  -DCMAKE_BUILD_TYPE=$BuildType `
-  -DBUILD_SHARED_LIBS=ON `
-  -DCMAKE_INSTALL_PREFIX=$installRoot\cjson
-cmake --build $cjsonBuild --parallel
-cmake --install $cjsonBuild
 
 Write-Host "=== 构建 OpenSSL ===" -ForegroundColor Cyan
 if (-not (Get-Command perl -ErrorAction SilentlyContinue)) {
@@ -124,19 +106,32 @@ if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
 
 $opensslArchive = Join-Path $srcRoot "openssl-$OpenSslVersion.tar.gz"
 $opensslSrc = Join-Path $srcRoot "openssl-$OpenSslVersion"
-Download-IfMissing "https://www.openssl.org/source/openssl-$OpenSslVersion.tar.gz" $opensslArchive
+Download-IfMissing "https://deb.debian.org/debian/pool/main/o/openssl/openssl-$OpenSslVersion.orig.tar.gz" $opensslArchive
 Expand-Tar $opensslArchive $opensslSrc
 
 $opensslInstall = Join-Path $installRoot "openssl"
+
+# Cygwin make/sh 无法执行含空格/反斜杠的 Windows 路径（"DevEco Studio"），
+# 建立无空格 junction 别名，并用 POSIX 路径调用 NDK 工具链
+$ndkDrive = (Get-Item $NdkRoot).PSDrive.Name
+$ndkJunction = "$($ndkDrive):\ohos_ndk"
+if (-not (Test-Path $ndkJunction)) {
+  New-Item -ItemType Junction -Path $ndkJunction -Target $NdkRoot | Out-Null
+  Write-Host "已创建 NDK junction: $ndkJunction -> $NdkRoot"
+}
+$ndkPosix = "/cygdrive/$($ndkDrive.ToLower())/ohos_ndk"
+$ndkFwd = $ndkJunction -replace '\\', '/'
+
 Push-Location $opensslSrc
 try {
-  $env:CC = Join-Path $NdkRoot "llvm\bin\clang.exe"
-  $env:AR = Join-Path $NdkRoot "llvm\bin\llvm-ar.exe"
-  $env:RANLIB = Join-Path $NdkRoot "llvm\bin\llvm-ranlib.exe"
-  $env:CFLAGS = "--target=aarch64-linux-ohos --sysroot=$NdkRoot\sysroot -fPIC"
-  $env:LDFLAGS = "--target=aarch64-linux-ohos --sysroot=$NdkRoot\sysroot"
+  $env:CC = "$ndkPosix/llvm/bin/clang.exe"
+  $env:AR = "$ndkPosix/llvm/bin/llvm-ar.exe"
+  $env:RANLIB = "$ndkPosix/llvm/bin/llvm-ranlib.exe"
+  $env:CFLAGS = "--target=aarch64-linux-ohos --sysroot=$ndkFwd/sysroot -fPIC"
+  $env:LDFLAGS = "--target=aarch64-linux-ohos --sysroot=$ndkFwd/sysroot"
 
-  perl Configure linux-aarch64 --prefix=$opensslInstall no-tests no-shared
+  $opensslInstallFwd = $opensslInstall -replace '\\', '/'
+  perl Configure linux-aarch64 "--prefix=$opensslInstallFwd" no-tests no-shared
   make -j
   make install_sw
 } finally {

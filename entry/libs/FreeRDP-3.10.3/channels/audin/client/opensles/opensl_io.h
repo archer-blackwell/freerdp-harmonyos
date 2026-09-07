@@ -31,7 +31,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define FREERDP_CHANNEL_AUDIN_CLIENT_OPENSL_IO_H
 
 #include <SLES/OpenSLES.h>
-#include <SLES/OpenSLES_Android.h>
 
 #include <freerdp/api.h>
 

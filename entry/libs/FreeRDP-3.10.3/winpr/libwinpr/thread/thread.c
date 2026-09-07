@@ -1035,7 +1035,8 @@ BOOL TerminateThread(HANDLE hThread, DWORD dwExitCode)
 	if (!run_mutex_fkt(pthread_mutex_lock, &thread->mutex))
 		return FALSE;
 
-#ifndef ANDROID
+/* OHOS musl 不提供 pthread_cancel（原版预编译库同样未引用该符号） */
+#if !defined(ANDROID) && !defined(__MUSL__)
 	pthread_cancel(thread->thread);
 #else
 	WLog_ERR(TAG, "Function not supported on this platform!");

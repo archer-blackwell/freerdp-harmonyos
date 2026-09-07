@@ -211,11 +211,9 @@ export class RdpSessionManager {
       }
     }
     
-    // Enter background mode in native code
-    if (currentInstance !== 0) {
-      LibFreeRDP.enterBackgroundMode(currentInstance);
-    }
-    
+    // Keep the RDP worker and TCP connection alive. Native SuppressOutput was
+    // intentionally removed here because this port could invalidate the event
+    // loop and disconnect when the device was unlocked again.
     // Start keepalive timer
     this.startKeepaliveTimer();
     
@@ -236,18 +234,6 @@ export class RdpSessionManager {
     
     // Stop keepalive timer
     this.stopKeepaliveTimer();
-    
-    // Exit background mode in native code
-    if (currentInstance !== 0) {
-      LibFreeRDP.exitBackgroundMode(currentInstance);
-      
-      // Request full screen refresh
-      setTimeout(() => {
-        if (currentInstance !== 0) {
-          LibFreeRDP.requestRefresh(currentInstance);
-        }
-      }, 100);
-    }
     
     // Stop background service (optional - can keep running for stability)
     // if (backgroundService) {
@@ -273,11 +259,6 @@ export class RdpSessionManager {
       await backgroundService.start();
     }
     
-    // Enter background mode
-    if (currentInstance !== 0) {
-      LibFreeRDP.enterBackgroundMode(currentInstance);
-    }
-    
     // Start keepalive
     this.startKeepaliveTimer();
     
@@ -298,17 +279,6 @@ export class RdpSessionManager {
     // If app is in foreground, exit background mode
     if (!isInBackground) {
       this.stopKeepaliveTimer();
-      
-      if (currentInstance !== 0) {
-        LibFreeRDP.exitBackgroundMode(currentInstance);
-        
-        // Request full screen refresh
-        setTimeout(() => {
-          if (currentInstance !== 0) {
-            LibFreeRDP.requestRefresh(currentInstance);
-          }
-        }, 100);
-      }
       
       this.notifyStateChanged(SessionState.CONNECTED);
     }

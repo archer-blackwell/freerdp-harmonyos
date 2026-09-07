@@ -82,6 +82,7 @@ target_link_libraries(freerdp_harmonyos
     # HarmonyOS N-API
     ace_napi.z
     hilog_ndk.z
+    native_window
     OpenSLES
     
     # FreeRDP libraries - 使用官方客户端库

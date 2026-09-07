@@ -121,6 +121,8 @@ static void CallJS_InstanceOnly(napi_env env, napi_value js_callback, void* cont
 static void CallJS_GraphicsUpdate(napi_env env, napi_value js_callback, void* context, void* data) {
     if (!env || !js_callback || !data) return;
     CallbackData* cbData = static_cast<CallbackData*>(data);
+    // This runs on the ArkTS event loop, not on FreeRDP's worker thread.
+    LOGI("CallJS_GraphicsUpdate: instance=%{public}lld", (long long)cbData->instance);
     napi_value global, result;
     if (napi_get_global(env, &global) != napi_ok) {
         delete cbData;
@@ -232,6 +234,12 @@ static void OnSettingsChangedImpl(int64_t instance, int width, int height, int b
 
 static void OnGraphicsUpdateImpl(int64_t instance, int x, int y, int width, int height) {
     std::lock_guard<std::mutex> lock(g_tsfnMutex);
+    static int updateCount = 0;
+    if (updateCount < 5) {
+        LOGI("OnGraphicsUpdate entered: instance=%{public}lld region=%d,%d %dx%d tsfn=%{public}p",
+             (long long)instance, x, y, width, height, (void*)g_tsfnGraphicsUpdate);
+        updateCount++;
+    }
     if (!g_tsfnGraphicsUpdate) return;
     CallbackData* data = new CallbackData{instance};
     data->x = x;
@@ -593,15 +601,32 @@ static napi_value FreerdpRequestRefreshRect(napi_env env, napi_callback_info inf
     size_t argc = 5;
     napi_value args[5];
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-    
+
     int64_t instance = GetInt64(env, args[0]);
     int32_t x = GetInt32(env, args[1]);
     int32_t y = GetInt32(env, args[2]);
     int32_t width = GetInt32(env, args[3]);
     int32_t height = GetInt32(env, args[4]);
-    
+
     bool success = freerdp_harmonyos_request_refresh_rect(instance, x, y, width, height);
-    
+
+    napi_value result;
+    napi_get_boolean(env, success, &result);
+    return result;
+}
+
+// freerdpRequestDesktopResize(instance: number, width: number, height: number): boolean
+static napi_value FreerdpRequestDesktopResize(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value args[3];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    int64_t instance = GetInt64(env, args[0]);
+    int32_t width = GetInt32(env, args[1]);
+    int32_t height = GetInt32(env, args[2]);
+
+    bool success = freerdp_harmonyos_request_desktop_resize(instance, width, height);
+
     napi_value result;
     napi_get_boolean(env, success, &result);
     return result;
@@ -662,6 +687,127 @@ static napi_value FreerdpCheckConnectionStatus(napi_env env, napi_callback_info 
     
     napi_value result;
     napi_create_int32(env, status, &result);
+    return result;
+}
+
+static napi_value FreerdpGetFrameBuffer(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    int64_t instance = GetInt64(env, args[0]);
+    uint8_t* gdiBuffer = nullptr;
+    int width = 0;
+    int height = 0;
+    int stride = 0;
+    if (!freerdp_harmonyos_get_frame_buffer(instance, &gdiBuffer, &width, &height, &stride) ||
+        !gdiBuffer || width <= 0 || height <= 0 || stride <= 0) {
+        napi_value nullValue;
+        napi_get_null(env, &nullValue);
+        return nullValue;
+    }
+
+    const size_t rowSize = static_cast<size_t>(width) * 4;
+    const size_t bufferSize = rowSize * static_cast<size_t>(height);
+    void* copiedData = nullptr;
+    napi_value copiedBuffer;
+    if (napi_create_arraybuffer(env, bufferSize, &copiedData, &copiedBuffer) != napi_ok) {
+        napi_value nullValue;
+        napi_get_null(env, &nullValue);
+        return nullValue;
+    }
+    auto* destination = static_cast<uint8_t*>(copiedData);
+    for (int row = 0; row < height; row++) {
+        const auto* sourceRow = gdiBuffer + static_cast<size_t>(row) * static_cast<size_t>(stride);
+        auto* destinationRow = destination + static_cast<size_t>(row) * rowSize;
+        for (int column = 0; column < width; column++) {
+            const size_t offset = static_cast<size_t>(column) * 4;
+            destinationRow[offset] = sourceRow[offset];
+            destinationRow[offset + 1] = sourceRow[offset + 1];
+            destinationRow[offset + 2] = sourceRow[offset + 2];
+            destinationRow[offset + 3] = 0xFF;
+        }
+    }
+
+    napi_value result;
+    napi_create_object(env, &result);
+    napi_value value;
+    napi_create_int32(env, width, &value);
+    napi_set_named_property(env, result, "width", value);
+    napi_create_int32(env, height, &value);
+    napi_set_named_property(env, result, "height", value);
+    napi_create_int32(env, static_cast<int>(rowSize), &value);
+    napi_set_named_property(env, result, "stride", value);
+    napi_set_named_property(env, result, "buffer", copiedBuffer);
+    return result;
+}
+
+static napi_value FreerdpSetSurfaceId(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    std::string surfaceId = GetString(env, args[0]);
+    uint64_t id = 0;
+    try {
+        id = std::stoull(surfaceId);
+    } catch (...) {
+        LOGE("setSurfaceId: invalid surface id");
+    }
+    napi_value result;
+    napi_get_boolean(env, freerdp_harmonyos_set_surface_id(id), &result);
+    return result;
+}
+
+static napi_value FreerdpReleaseSurface(napi_env env, napi_callback_info info) {
+    freerdp_harmonyos_release_surface();
+    napi_value undefined;
+    napi_get_undefined(env, &undefined);
+    return undefined;
+}
+
+// freerdpSetViewport(scale: number, offsetX: number, offsetY: number): void
+static napi_value FreerdpSetViewport(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value args[3];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    double scale = 1.0;
+    double offsetX = 0.0;
+    double offsetY = 0.0;
+    napi_get_value_double(env, args[0], &scale);
+    napi_get_value_double(env, args[1], &offsetX);
+    napi_get_value_double(env, args[2], &offsetY);
+
+    freerdp_harmonyos_set_viewport((float)scale, (float)offsetX, (float)offsetY);
+
+    napi_value undefined;
+    napi_get_undefined(env, &undefined);
+    return undefined;
+}
+
+// freerdpSetDisplayMode(mode: number): boolean
+// mode: 0 = FIT (aspect-fit, letterbox), 1 = FILL (stretch to full screen)
+static napi_value FreerdpSetDisplayMode(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    int32_t mode = HARMONYOS_DISPLAY_MODE_FIT;
+    if (argc >= 1) {
+        napi_get_value_int32(env, args[0], &mode);
+    }
+
+    napi_value result;
+    napi_get_boolean(env, freerdp_harmonyos_set_display_mode((int)mode), &result);
+    return result;
+}
+
+// freerdpGetDisplayMode(): number
+static napi_value FreerdpGetDisplayMode(napi_env env, napi_callback_info info) {
+    (void)info;
+    napi_value result;
+    napi_create_int32(env, freerdp_harmonyos_get_display_mode(), &result);
     return result;
 }
 
@@ -834,12 +980,19 @@ static napi_value Init(napi_env env, napi_value exports) {
         // Screen refresh
         { "freerdpRequestRefresh", nullptr, FreerdpRequestRefresh, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "freerdpRequestRefreshRect", nullptr, FreerdpRequestRefreshRect, nullptr, nullptr, nullptr, napi_default, nullptr },
+    { "freerdpRequestDesktopResize", nullptr, FreerdpRequestDesktopResize, nullptr, nullptr, nullptr, napi_default, nullptr },
         
         // Connection stability
         { "freerdpIsInBackgroundMode", nullptr, FreerdpIsInBackgroundMode, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "freerdpSendKeepalive", nullptr, FreerdpSendKeepalive, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "freerdpGetIdleTime", nullptr, FreerdpGetIdleTime, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "freerdpCheckConnectionStatus", nullptr, FreerdpCheckConnectionStatus, nullptr, nullptr, nullptr, napi_default, nullptr },
+            { "freerdpGetFrameBuffer", nullptr, FreerdpGetFrameBuffer, nullptr, nullptr, nullptr, napi_default, nullptr },
+            { "freerdpSetSurfaceId", nullptr, FreerdpSetSurfaceId, nullptr, nullptr, nullptr, napi_default, nullptr },
+            { "freerdpReleaseSurface", nullptr, FreerdpReleaseSurface, nullptr, nullptr, nullptr, napi_default, nullptr },
+            { "freerdpSetViewport", nullptr, FreerdpSetViewport, nullptr, nullptr, nullptr, napi_default, nullptr },
+            { "freerdpSetDisplayMode", nullptr, FreerdpSetDisplayMode, nullptr, nullptr, nullptr, napi_default, nullptr },
+            { "freerdpGetDisplayMode", nullptr, FreerdpGetDisplayMode, nullptr, nullptr, nullptr, napi_default, nullptr },
         
         // Callback setters
         { "setOnConnectionSuccess", nullptr, SetOnConnectionSuccess, nullptr, nullptr, nullptr, napi_default, nullptr },

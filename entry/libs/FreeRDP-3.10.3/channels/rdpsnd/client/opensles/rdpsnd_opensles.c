@@ -141,7 +141,6 @@ static BOOL rdpsnd_opensles_open(rdpsndDevicePlugin* device, const AUDIO_FORMAT*
 		return TRUE;
 
 	opensles->stream = android_OpenAudioDevice(opensles->rate, opensles->channels, 20);
-	WINPR_ASSERT(opensles->stream);
 
 	if (!opensles->stream)
 		WLog_ERR(TAG, "android_OpenAudioDevice failed");
@@ -167,20 +166,28 @@ static void rdpsnd_opensles_free(rdpsndDevicePlugin* device)
 {
 	rdpsndopenslesPlugin* opensles = (rdpsndopenslesPlugin*)device;
 	DEBUG_SND("opensles=%p", (void*)opensles);
-	WINPR_ASSERT(opensles);
-	WINPR_ASSERT(opensles->device_name);
+	if (!opensles)
+		return;
+
+	/* HarmonyOS fix: ensure the OpenSL device is closed before freeing the plugin */
+	if (opensles->stream)
+	{
+		android_CloseAudioDevice(opensles->stream);
+		opensles->stream = NULL;
+	}
+
 	free(opensles->device_name);
 	free(opensles);
 }
 
 static BOOL rdpsnd_opensles_format_supported(rdpsndDevicePlugin* device, const AUDIO_FORMAT* format)
 {
+	if (!device || !format)
+		return FALSE;
 	DEBUG_SND("format=%" PRIu16 ", cbsize=%" PRIu16 ", samples=%" PRIu32 ", bits=%" PRIu16
 	          ", channels=%" PRIu16 ", align=%" PRIu16 "",
 	          format->wFormatTag, format->cbSize, format->nSamplesPerSec, format->wBitsPerSample,
 	          format->nChannels, format->nBlockAlign);
-	WINPR_ASSERT(device);
-	WINPR_ASSERT(format);
 
 	switch (format->wFormatTag)
 	{
@@ -205,7 +212,9 @@ static UINT32 rdpsnd_opensles_get_volume(rdpsndDevicePlugin* device)
 {
 	rdpsndopenslesPlugin* opensles = (rdpsndopenslesPlugin*)device;
 	DEBUG_SND("opensles=%p", (void*)opensles);
-	WINPR_ASSERT(opensles);
+
+	if (!opensles)
+		return 0;
 
 	if (opensles->stream)
 	{
@@ -228,7 +237,10 @@ static BOOL rdpsnd_opensles_set_volume(rdpsndDevicePlugin* device, UINT32 value)
 {
 	rdpsndopenslesPlugin* opensles = (rdpsndopenslesPlugin*)device;
 	DEBUG_SND("opensles=%p, value=%" PRIu32 "", (void*)opensles, value);
-	WINPR_ASSERT(opensles);
+
+	if (!opensles)
+		return FALSE;
+
 	opensles->volume = value;
 
 	if (opensles->stream)
@@ -267,9 +279,10 @@ static UINT rdpsnd_opensles_play(rdpsndDevicePlugin* device, const BYTE* data, s
 
 	src.b = data;
 	DEBUG_SND("size=%d, src=%p", size, (void*)src.b);
-	WINPR_ASSERT(0 == size % 2);
-	WINPR_ASSERT(size > 0);
-	WINPR_ASSERT(src.b);
+
+	if (!src.b || (size == 0) || ((size % 2) != 0))
+		return 0;
+
 	ret = android_AudioOut(opensles->stream, src.s, size / 2);
 
 	if (ret < 0)
@@ -296,9 +309,10 @@ static int rdpsnd_opensles_parse_addin_args(rdpsndDevicePlugin* device, ADDIN_AR
 		{ NULL, 0, NULL, NULL, NULL, -1, NULL, NULL }
 	};
 
-	WINPR_ASSERT(opensles);
-	WINPR_ASSERT(args);
 	DEBUG_SND("opensles=%p, args=%p", (void*)opensles, (void*)args);
+
+	if (!opensles || !args)
+		return ERROR_INVALID_PARAMETER;
 	flags =
 	    COMMAND_LINE_SIGIL_NONE | COMMAND_LINE_SEPARATOR_COLON | COMMAND_LINE_IGN_UNKNOWN_KEYWORD;
 	status = CommandLineParseArgumentsA(args->argc, args->argv, rdpsnd_opensles_args, flags,

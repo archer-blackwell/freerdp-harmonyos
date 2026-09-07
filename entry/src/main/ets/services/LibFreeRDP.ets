@@ -15,6 +15,14 @@ interface FreerdpNative {
   setOnPreConnect(callback: (instance: number) => void): void;
   setOnDisconnecting(callback: (instance: number) => void): void;
   setOnDisconnected(callback: (instance: number) => void): void;
+  // Receives dirty-region notifications from Native after a frame snapshot is ready.
+  setOnGraphicsUpdate(callback: (instance: number, x: number, y: number, width: number, height: number) => void): void;
+  // 连接建立后 Native 上报实际协商的桌面分辨率（instance, width, height, bpp）。
+  setOnSettingsChanged(callback: (instance: number, width: number, height: number, bpp: number) => void): void;
+  // 服务器动态调整桌面分辨率时 Native 上报（instance, width, height, bpp），随 setOnSettingsChanged 复用处理器。
+  setOnGraphicsResize(callback: (instance: number, width: number, height: number, bpp: number) => void): void;
+  // 通过 Display Control 通道请求服务器调整桌面分辨率（旋转跟随）。
+  freerdpRequestDesktopResize(inst: number, width: number, height: number): boolean;
   freerdpHasH264(): boolean;
   freerdpNew(): number;
   freerdpDisconnect(inst: number): boolean;
@@ -41,12 +49,29 @@ interface FreerdpNative {
   freerdpSendKeepalive(inst: number): boolean;
   freerdpGetIdleTime(inst: number): number;
   freerdpCheckConnectionStatus(inst: number): number;
+  freerdpGetFrameBuffer(inst: number): FrameBuffer | null;
+  freerdpSetSurfaceId(surfaceId: string): boolean;
+  freerdpReleaseSurface(): void;
+  freerdpSetViewport(scale: number, offsetX: number, offsetY: number): void;
+  freerdpSetDisplayMode(mode: number): boolean;
+  freerdpGetDisplayMode(): number;
+}
+
+interface FrameBuffer {
+  width: number;
+  height: number;
+  stride: number;
+  buffer: ArrayBuffer;
 }
 
 let nativeLoaded = false;
 let nativeInitAttempted = false;
 let nativeLoadError: string | null = null;
 let freerdpNative: FreerdpNative | null = null;
+
+// 模块级监听：native 侧只注册一次，业务层通过 set/clear 接管与释放（SDK 作用域语义）
+let settingsChangedCallback: ((instance: number, width: number, height: number, bpp: number) => void) | null = null;
+let graphicsResizeCallback: ((instance: number, width: number, height: number, bpp: number) => void) | null = null;
 
 function resolveNativeModule(): FreerdpNative | null {
   if (freerdpNative) {
@@ -62,9 +87,12 @@ function resolveNativeModule(): FreerdpNative | null {
   return null;
 }
 
+// Display mode constants (matching C layer HARMONYOS_DISPLAY_MODE)
+export const DISPLAY_MODE_FIT = 0;   // 自适应：按书签分辨率请求桌面，等比居中显示（留黑边）
+export const DISPLAY_MODE_FILL = 1;  // 铺满全屏：FreeRDP Fullscreen（/f），按屏幕分辨率请求桌面，等比 1:1 铺满（不拉伸）
+
 // Cursor type constants (matching C layer definitions)
-export const CURSOR_TYPE_UNKNOWN = 0;
-export const CURSOR_TYPE_DEFAULT = 1;      // 默认箭头
+export const CURSOR_TYPE_UNKNOWN = 0;export const CURSOR_TYPE_DEFAULT = 1;      // 默认箭头
 export const CURSOR_TYPE_HAND = 2;         // 手型（链接）
 export const CURSOR_TYPE_IBEAM = 3;        // I型（文本）
 export const CURSOR_TYPE_SIZE_NS = 4;      // 上下双箭头（调整行高）
@@ -100,6 +128,7 @@ export interface EventListener {
   OnConnectionFailure(instance: number): void;
   OnDisconnecting(instance: number): void;
   OnDisconnected(instance: number): void;
+  OnGraphicsUpdate(instance: number, x: number, y: number, width: number, height: number): void;
 }
 
 // UI event listener interface
@@ -178,8 +207,23 @@ export interface BookmarkSettings {
 // Instance state tracking
 const instanceState: Map<number, boolean> = new Map();
 
+// Instances pending native free after their async disconnect completes
+const pendingFree: Set<number> = new Set();
+
 // Global event listener
 let eventListener: EventListener | null = null;
+
+function freeNativeIfPending(instance: number): void {
+  if (!pendingFree.has(instance)) {
+    return;
+  }
+  pendingFree.delete(instance);
+  try {
+    freerdpNative!.freerdpFree(instance);
+  } catch (e) {
+    console.error(`[LibFreeRDP] Deferred native free failed for instance ${instance}`, e);
+  }
+}
 
 // H.264 support flag
 let hasH264Support: boolean = false;
@@ -197,6 +241,7 @@ function initCallbacks(nativeModule: FreerdpNative): void {
   nativeModule.setOnConnectionFailure((instance: number) => {
     console.error(`[LibFreeRDP] OnConnectionFailure: instance=${instance}`);
     instanceState.delete(instance);
+    freeNativeIfPending(instance);
     if (eventListener) {
       eventListener.OnConnectionFailure(instance);
     }
@@ -219,8 +264,34 @@ function initCallbacks(nativeModule: FreerdpNative): void {
   nativeModule.setOnDisconnected((instance: number) => {
     console.info(`[LibFreeRDP] OnDisconnected: instance=${instance}`);
     instanceState.delete(instance);
+    freeNativeIfPending(instance);
     if (eventListener) {
       eventListener.OnDisconnected(instance);
+    }
+  });
+
+  // Register this independently of the disconnect callback. Registering it
+  // inside setOnDisconnected would delay graphics registration until teardown.
+  nativeModule.setOnGraphicsUpdate((instance: number, x: number, y: number, width: number, height: number) => {
+    console.info(`[LibFreeRDP] Graphics callback consumed: instance=${instance}`);
+    if (eventListener) {
+      eventListener.OnGraphicsUpdate(instance, x, y, width, height);
+    }
+  });
+
+  // 实际协商桌面分辨率回调（PostConnect 时 Native 上报 settings 的 DesktopWidth/Height）
+  nativeModule.setOnSettingsChanged((instance: number, width: number, height: number, bpp: number) => {
+    console.info(`[LibFreeRDP] OnSettingsChanged: instance=${instance} ${width}x${height}@${bpp}`);
+    if (settingsChangedCallback) {
+      settingsChangedCallback(instance, width, height, bpp);
+    }
+  });
+
+  // 服务器动态 resize 桌面（Display Control）时上报新尺寸
+  nativeModule.setOnGraphicsResize((instance: number, width: number, height: number, bpp: number) => {
+    console.info(`[LibFreeRDP] OnGraphicsResize: instance=${instance} ${width}x${height}@${bpp}`);
+    if (graphicsResizeCallback) {
+      graphicsResizeCallback(instance, width, height, bpp);
     }
   });
 
@@ -317,35 +388,30 @@ export class LibFreeRDP {
       return;
     }
     console.info(`${LibFreeRDP.TAG}: freeInstance(${inst})`);
-    
-    // Disconnect if still connected
+
     if (instanceState.get(inst)) {
+      // Still connected: initiate an async disconnect. The native instance is
+      // freed in the disconnect callback (which runs on this same main thread)
+      // after the native worker thread has fully stopped. Do NOT busy-wait here:
+      // the disconnect callback must run on the main thread, so a synchronous
+      // wait would deadlock and freeze the UI (THREAD_BLOCK / ANR).
+      pendingFree.add(inst);
       try {
         freerdpNative!.freerdpDisconnect(inst);
       } catch (e) {
         console.error(`${LibFreeRDP.TAG}: Failed to disconnect instance ${inst}`, e);
+        pendingFree.delete(inst);
+        instanceState.delete(inst);
       }
+      return;
     }
-    
-    // Wait for disconnect with timeout
-    const startTime = Date.now();
-    const timeout = 30000; // 30 seconds
-    
-    while (instanceState.get(inst)) {
-      const remaining = timeout - (Date.now() - startTime);
-      if (remaining <= 0) {
-        console.error(`${LibFreeRDP.TAG}: Timeout waiting for instance ${inst} to disconnect`);
-        break;
-      }
-      // Busy wait - in production, use proper async handling
-    }
-    
+
+    // Not connected: free immediately.
     try {
       freerdpNative!.freerdpFree(inst);
     } catch (e) {
       console.error(`${LibFreeRDP.TAG}: Failed to free instance ${inst}`, e);
     }
-    
     instanceState.delete(inst);
   }
 
@@ -391,7 +457,8 @@ export class LibFreeRDP {
   /**
    * Set connection info from bookmark settings
    */
-  static setConnectionInfo(inst: number, bookmark: BookmarkSettings, clientName: string = ''): boolean {
+  static setConnectionInfo(inst: number, bookmark: BookmarkSettings, clientName: string = '',
+    isFullscreen: boolean = false): boolean {
     if (!LibFreeRDP.ensureNativeReady()) {
       return false;
     }
@@ -420,7 +487,14 @@ export class LibFreeRDP {
     }
     
     // Screen settings
-    args.push(`/size:${bookmark.screenSettings.width}x${bookmark.screenSettings.height}`);
+    if (isFullscreen) {
+      // 全屏模式：FreeRDP Fullscreen（/f，等价安卓侧 isFullscreen=true）；
+      // 配合业务层按屏幕分辨率下发的 /size，服务器返回与屏幕一致的桌面，等比 1:1 铺满（不拉伸）
+      args.push('/f');
+      // 启用 Display Control 动态分辨率：旋转/方向切换时业务层可请求服务器 resize 桌面保持铺满
+      args.push('/dynamic-resolution');
+    }
+    args.push(`/size:${bookmark.screenSettings.width}x${bookmark.screenSettings.height}`); // 桌面分辨率（全屏模式=屏幕分辨率）
     args.push(`/bpp:${bookmark.screenSettings.colors}`);
     
     // Advanced settings
@@ -860,6 +934,102 @@ export class LibFreeRDP {
       console.error(`${LibFreeRDP.TAG}: checkConnectionStatus error:`, e);
       return -1;
     }
+  }
+
+  static getFrameBuffer(inst: number): FrameBuffer | null {
+    if (!LibFreeRDP.ensureNativeReady()) {
+      return null;
+    }
+    return freerdpNative!.freerdpGetFrameBuffer(inst);
+  }
+
+  static setSurfaceId(surfaceId: string): boolean {
+    if (!LibFreeRDP.ensureNativeReady()) {
+      return false;
+    }
+    return freerdpNative!.freerdpSetSurfaceId(surfaceId);
+  }
+
+  static releaseSurface(): void {
+    if (LibFreeRDP.ensureNativeReady()) {
+      freerdpNative!.freerdpReleaseSurface();
+    }
+  }
+
+  /**
+   * Set the render viewport transform.
+   * FIT 模式: scale = 绝对缩放比，offset 为画面左上角在 Surface 中的像素偏移。
+   * FILL 模式: scale = 相对铺满基准的缩放系数（1.0 = 正好铺满），offset 为平移像素偏移。
+   */
+  static setViewport(scale: number, offsetX: number, offsetY: number): void {
+    if (!LibFreeRDP.ensureNativeReady()) {
+      return;
+    }
+    freerdpNative!.freerdpSetViewport(scale, offsetX, offsetY);
+  }
+
+  /**
+   * Set the native renderer display mode.
+   * mode: DISPLAY_MODE_FIT (0) = 自适应居中；DISPLAY_MODE_FILL (1) = 铺满整屏。
+   * 两种模式下捏合缩放/平移均可用。
+   */
+  static setDisplayMode(mode: number): boolean {
+    if (!LibFreeRDP.ensureNativeReady()) {
+      return false;
+    }
+    return freerdpNative!.freerdpSetDisplayMode(mode);
+  }
+
+  /**
+   * Get the current native renderer display mode (0 = FIT, 1 = FILL).
+   */
+  static getDisplayMode(): number {
+    if (!LibFreeRDP.ensureNativeReady()) {
+      return DISPLAY_MODE_FIT;
+    }
+    return freerdpNative!.freerdpGetDisplayMode();
+  }
+
+  /**
+   * 注册"实际协商桌面分辨率"监听（连接建立时 Native 上报一次）。
+   * 回调携带 instance，业务层需自行过滤当前会话；重复注册会覆盖前一个。
+   */
+  static setOnSettingsChanged(callback: (instance: number, width: number, height: number,
+    bpp: number) => void): void {
+    settingsChangedCallback = callback;
+  }
+
+  /**
+   * 释放"实际协商桌面分辨率"监听（只清除本模块作用域内的回调，页面销毁时调用）。
+   */
+  static clearOnSettingsChanged(): void {
+    settingsChangedCallback = null;
+  }
+
+  /**
+   * 注册"服务器动态 resize 桌面"监听；重复注册会覆盖前一个。
+   */
+  static setOnGraphicsResize(callback: (instance: number, width: number, height: number,
+    bpp: number) => void): void {
+    graphicsResizeCallback = callback;
+  }
+
+  /**
+   * 释放"服务器动态 resize 桌面"监听（页面销毁时调用）。
+   */
+  static clearOnGraphicsResize(): void {
+    graphicsResizeCallback = null;
+  }
+
+  /**
+   * 请求服务器调整桌面分辨率（Display Control 通道，需连接时启用 /dynamic-resolution）。
+   * 返回 false 表示通道不可用或服务器拒绝（业务层保持 letterbox 兜底）。
+   */
+  static requestDesktopResize(inst: number, width: number, height: number): boolean {
+    if (!LibFreeRDP.ensureNativeReady()) {
+      return false;
+    }
+    return freerdpNative!.freerdpRequestDesktopResize(inst, width, height);
   }
 }
 

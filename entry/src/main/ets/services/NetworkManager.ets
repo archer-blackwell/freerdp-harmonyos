@@ -42,6 +42,11 @@ export interface SessionInfo {
 }
 
 let currentSession: SessionInfo | null = null;
+// This state is separate from `currentSession`: session info is populated before
+// the first connect, so a network-available callback must not mistake CONNECTING
+// for a disconnected session and start a second FreeRDP instance.
+type SessionConnectionPhase = 'connecting' | 'connected' | 'disconnected';
+let sessionConnectionPhase: SessionConnectionPhase = 'disconnected';
 
 /**
  * Network Manager
@@ -77,8 +82,9 @@ export class NetworkManager {
           onNetworkAvailableCallback();
         }
 
-        // Trigger reconnect if we have a session to reconnect
-        if (currentSession && !isReconnecting) {
+        // `netAvailable` also fires during normal startup. Reconnect only after
+        // a previously active connection has reported that it is disconnected.
+        if (currentSession && sessionConnectionPhase === 'disconnected' && !isReconnecting) {
           NetworkManager.startReconnect();
         }
       });
@@ -127,6 +133,7 @@ export class NetworkManager {
 
     NetworkManager.cancelReconnect();
     currentSession = null;
+    sessionConnectionPhase = 'disconnected';
   }
 
   /**
@@ -144,11 +151,35 @@ export class NetworkManager {
     console.info(`${TAG}: Session info set for reconnection: ${session.hostname}:${session.port}`);
   }
 
+  static markConnecting(instance: number): void {
+    // Ignore callbacks from stale instances left over after a reconnect.
+    if (currentSession && currentSession.instance === instance) {
+      sessionConnectionPhase = 'connecting';
+    }
+  }
+
+  static markConnected(instance: number): void {
+    // A successful connection cancels any pending timer before it can create
+    // another instance for the same Windows session.
+    if (currentSession && currentSession.instance === instance) {
+      sessionConnectionPhase = 'connected';
+      NetworkManager.cancelReconnect();
+    }
+  }
+
+  static markDisconnected(instance: number): void {
+    // Only the current instance may make the session eligible for reconnect.
+    if (currentSession && currentSession.instance === instance) {
+      sessionConnectionPhase = 'disconnected';
+    }
+  }
+
   /**
    * Clear session info
    */
   static clearSessionInfo(): void {
     currentSession = null;
+    sessionConnectionPhase = 'disconnected';
     NetworkManager.cancelReconnect();
     console.info(`${TAG}: Session info cleared`);
   }
@@ -332,12 +363,15 @@ export class NetworkManager {
       }
 
       // Connect
+      // Store the new handle before connect() so callbacks and network events
+      // can identify this instance while the connection is being established.
+      currentSession.instance = newInstance;
+      NetworkManager.markConnecting(newInstance);
       if (!LibFreeRDP.connect(newInstance)) {
         throw new Error('Failed to connect');
       }
 
-      // Update session instance
-      currentSession.instance = newInstance;
+      NetworkManager.markConnected(newInstance);
 
       console.info(`${TAG}: Reconnection successful`);
       isReconnecting = false;

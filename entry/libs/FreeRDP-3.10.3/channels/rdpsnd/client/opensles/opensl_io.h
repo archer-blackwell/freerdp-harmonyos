@@ -31,7 +31,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define FREERDP_CHANNEL_RDPSND_CLIENT_OPENSL_IO_H
 
 #include <SLES/OpenSLES.h>
-#include <SLES/OpenSLES_Android.h>
 #include <stdlib.h>
 #include <winpr/synch.h>
 
@@ -55,7 +54,7 @@ extern "C"
 		SLObjectItf bqPlayerObject;
 		SLPlayItf bqPlayerPlay;
 		SLVolumeItf bqPlayerVolume;
-		SLAndroidSimpleBufferQueueItf bqPlayerBufferQueue;
+		SLBufferQueueItf bqPlayerBufferQueue;
 		SLEffectSendItf bqPlayerEffectSend;
 
 		unsigned int outchannels;

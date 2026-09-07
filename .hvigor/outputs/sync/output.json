@@ -2,49 +2,49 @@
   "version": 1,
   "ohos-module-entry": {
     "SELECT_TARGET": "default",
-    "MODULE_BUILD_DIR": "C:\\huawei\\entry\\build",
+    "MODULE_BUILD_DIR": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build",
     "TARGETS": {
       "default": {
-        "SOURCE_ROOT": "C:\\huawei\\entry\\src\\main",
+        "SOURCE_ROOT": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\src\\main",
         "RESOURCES_PATH": [
-          "C:\\huawei\\entry\\src\\main\\resources"
+          "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\src\\main\\resources"
         ],
         "BUILD_PATH": {
-          "OUTPUT_PATH": "C:\\huawei\\entry\\build\\default\\outputs\\default",
-          "INTERMEDIA_PATH": "C:\\huawei\\entry\\build\\default\\intermediates",
-          "JS_ASSETS_PATH": "C:\\huawei\\entry\\build\\default\\intermediates\\loader_out\\default",
-          "JS_LITE_ASSETS_PATH": "C:\\huawei\\entry\\build\\default\\intermediates\\loader_out_lite\\default",
-          "RES_PATH": "C:\\huawei\\entry\\build\\default\\intermediates\\res\\default",
-          "RES_PROFILE_PATH": "C:\\huawei\\entry\\build\\default\\intermediates\\res\\default\\resources\\base\\profile",
-          "ETS_SUPER_VISUAL_PATH": "C:\\huawei\\entry\\build\\default\\cache\\default\\default@CompileArkTS\\esmodule",
-          "JS_SUPER_VISUAL_PATH": "C:\\huawei\\entry\\build\\default\\cache\\default\\default@CompileJS\\jsbundle",
-          "WORKER_LOADER": "C:\\huawei\\entry\\build\\default\\intermediates\\loader\\default\\loader.json",
-          "MANIFEST_JSON": "C:\\huawei\\entry\\build\\default\\intermediates\\manifest\\default",
-          "OUTPUT_METADATA_JSON": "C:\\huawei\\entry\\build\\default\\intermediates\\hap_metadata\\default\\output_metadata.json",
-          "SOURCE_MAP_DIR": "C:\\huawei\\entry\\build\\default\\intermediates\\source_map\\default"
+          "OUTPUT_PATH": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\outputs\\default",
+          "INTERMEDIA_PATH": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\intermediates",
+          "JS_ASSETS_PATH": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\intermediates\\loader_out\\default",
+          "JS_LITE_ASSETS_PATH": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\intermediates\\loader_out_lite\\default",
+          "RES_PATH": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\intermediates\\res\\default",
+          "RES_PROFILE_PATH": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\intermediates\\res\\default\\resources\\base\\profile",
+          "ETS_SUPER_VISUAL_PATH": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\cache\\default\\default@CompileArkTS\\esmodule",
+          "JS_SUPER_VISUAL_PATH": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\cache\\default\\default@CompileJS\\jsbundle",
+          "WORKER_LOADER": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\intermediates\\loader\\default\\loader.json",
+          "MANIFEST_JSON": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\intermediates\\manifest\\default",
+          "OUTPUT_METADATA_JSON": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\intermediates\\hap_metadata\\default\\output_metadata.json",
+          "SOURCE_MAP_DIR": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\intermediates\\source_map\\default"
         },
         "BUILD_OPTION": {
-          "debuggable": false
+          "debuggable": true
         }
       },
       "ohosTest": {
-        "SOURCE_ROOT": "C:\\huawei\\entry\\src\\ohosTest",
+        "SOURCE_ROOT": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\src\\ohosTest",
         "RESOURCES_PATH": [
-          "C:\\huawei\\entry\\src\\ohosTest\\resources"
+          "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\src\\ohosTest\\resources"
         ],
         "BUILD_PATH": {
-          "OUTPUT_PATH": "C:\\huawei\\entry\\build\\default\\outputs\\ohosTest",
-          "INTERMEDIA_PATH": "C:\\huawei\\entry\\build\\default\\intermediates",
-          "JS_ASSETS_PATH": "C:\\huawei\\entry\\build\\default\\intermediates\\loader_out\\ohosTest",
-          "JS_LITE_ASSETS_PATH": "C:\\huawei\\entry\\build\\default\\intermediates\\loader_out_lite\\ohosTest",
-          "RES_PATH": "C:\\huawei\\entry\\build\\default\\intermediates\\res\\ohosTest",
-          "RES_PROFILE_PATH": "C:\\huawei\\entry\\build\\default\\intermediates\\res\\ohosTest\\resources\\base\\profile",
-          "ETS_SUPER_VISUAL_PATH": "C:\\huawei\\entry\\build\\default\\cache\\ohosTest\\ohosTest@OhosTestCompileArkTS\\esmodule",
-          "JS_SUPER_VISUAL_PATH": "C:\\huawei\\entry\\build\\default\\cache\\ohosTest\\ohosTest@OhosTestCompileJS\\jsbundle",
-          "WORKER_LOADER": "C:\\huawei\\entry\\build\\default\\intermediates\\loader\\ohosTest\\loader.json",
-          "MANIFEST_JSON": "C:\\huawei\\entry\\build\\default\\intermediates\\manifest\\ohosTest",
-          "OUTPUT_METADATA_JSON": "C:\\huawei\\entry\\build\\default\\intermediates\\hap_metadata\\ohosTest\\output_metadata.json",
-          "SOURCE_MAP_DIR": "C:\\huawei\\entry\\build\\default\\intermediates\\source_map\\ohosTest"
+          "OUTPUT_PATH": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\outputs\\ohosTest",
+          "INTERMEDIA_PATH": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\intermediates",
+          "JS_ASSETS_PATH": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\intermediates\\loader_out\\ohosTest",
+          "JS_LITE_ASSETS_PATH": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\intermediates\\loader_out_lite\\ohosTest",
+          "RES_PATH": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\intermediates\\res\\ohosTest",
+          "RES_PROFILE_PATH": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\intermediates\\res\\ohosTest\\resources\\base\\profile",
+          "ETS_SUPER_VISUAL_PATH": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\cache\\ohosTest\\ohosTest@OhosTestCompileArkTS\\esmodule",
+          "JS_SUPER_VISUAL_PATH": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\cache\\ohosTest\\ohosTest@OhosTestCompileJS\\jsbundle",
+          "WORKER_LOADER": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\intermediates\\loader\\ohosTest\\loader.json",
+          "MANIFEST_JSON": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\intermediates\\manifest\\ohosTest",
+          "OUTPUT_METADATA_JSON": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\intermediates\\hap_metadata\\ohosTest\\output_metadata.json",
+          "SOURCE_MAP_DIR": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry\\build\\default\\intermediates\\source_map\\ohosTest"
         },
         "BUILD_OPTION": {
           "debuggable": true
@@ -53,7 +53,7 @@
     },
     "BUILD_OPTION": {
       "default-default": {
-        "debuggable": false,
+        "debuggable": true,
         "copyFrom": "default",
         "strictMode": {
           "caseSensitiveCheck": true,
@@ -72,17 +72,7 @@
             "arm64-v8a"
           ]
         },
-        "name": "release",
-        "arkOptions": {
-          "obfuscation": {
-            "ruleOptions": {
-              "enable": false,
-              "files": [
-                "./obfuscation-rules.txt"
-              ]
-            }
-          }
-        }
+        "name": "debug"
       }
     },
     "BUILD_PROFILE_OPT": {
@@ -136,17 +126,17 @@
   },
   "ohos-project": {
     "SELECT_PRODUCT_NAME": "default",
-    "MODULE_BUILD_DIR": "C:\\huawei\\build",
+    "MODULE_BUILD_DIR": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\build",
     "BUNDLE_NAME": "com.example.twgapplication",
     "VERSION_CODE": 1000000,
     "VERSION_NAME": "1.0.0",
     "BUILD_PATH": {
-      "OUTPUT_PATH": "C:\\huawei\\build\\outputs\\default"
+      "OUTPUT_PATH": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\build\\outputs\\default"
     },
     "MODULES": [
       {
         "name": "entry",
-        "srcPath": "C:\\huawei\\entry",
+        "srcPath": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos\\entry",
         "targets": [
           {
             "name": "default",
@@ -155,7 +145,7 @@
             ]
           }
         ],
-        "belongProjectPath": "C:\\huawei"
+        "belongProjectPath": "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos"
       }
     ],
     "PROFILE_OPT": {
@@ -165,13 +155,13 @@
             "name": "default",
             "type": "HarmonyOS",
             "material": {
-              "certpath": "C:\\Users\\Administrator\\.ohos\\config\\default_huawei_zidkWqUbJdiXtzTPBr0kwe13uGqFltXrzJ2rrlWZQjY=.cer",
+              "certpath": "C:\\Users\\USER2022\\.ohos\\config\\default_freerdp-harmonyos_vfOsQYx-HKdvqHySJbSTktzXe_FiuwA2elz4GgnsWWo=.cer",
               "keyAlias": "debugKey",
-              "keyPassword": "0000001A991BACCF4934C7E92E883CD7DD347E46C960A4EED92ED38103670A509E679FC0E2AB8ABCFEA5",
-              "profile": "C:\\Users\\Administrator\\.ohos\\config\\default_huawei_zidkWqUbJdiXtzTPBr0kwe13uGqFltXrzJ2rrlWZQjY=.p7b",
+              "keyPassword": "0000001BBCD25A474DD31C627053939464D7F5AA0C0CAFBD71B13615F964966049A2A3583C614746B877C7",
+              "profile": "C:\\Users\\USER2022\\.ohos\\config\\default_freerdp-harmonyos_vfOsQYx-HKdvqHySJbSTktzXe_FiuwA2elz4GgnsWWo=.p7b",
               "signAlg": "SHA256withECDSA",
-              "storeFile": "C:\\Users\\Administrator\\.ohos\\config\\default_huawei_zidkWqUbJdiXtzTPBr0kwe13uGqFltXrzJ2rrlWZQjY=.p12",
-              "storePassword": "0000001AFA58AFDA9672451D9062C963C76F43147E0D9EA02872EE20504A24F72A28768F276DAB79B519"
+              "storeFile": "C:\\Users\\USER2022\\.ohos\\config\\default_freerdp-harmonyos_vfOsQYx-HKdvqHySJbSTktzXe_FiuwA2elz4GgnsWWo=.p12",
+              "storePassword": "0000001B4CDC67ED68323AFA030C1C7CFB510398AD9B1DEAFAE302F9F3176DF27B9A942EE2BB8286A99BBF"
             }
           }
         ],
@@ -220,7 +210,7 @@
       "hvigor.keepDependency": true
     },
     "OVERALL_PROJECT_PATHS": [
-      "C:\\huawei"
+      "E:\\HarmonyOs\\Worker\\ProjectFiles\\freerdp-harmonyos"
     ],
     "BUILD_CACHE_DIR": ""
   }

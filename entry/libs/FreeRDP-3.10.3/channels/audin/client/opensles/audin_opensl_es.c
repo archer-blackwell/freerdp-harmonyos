@@ -105,7 +105,6 @@ static BOOL audin_opensles_format_supported(IAudinDevice* device, const AUDIO_FO
 		return FALSE;
 
 	WLog_Print(opensles->log, WLOG_DEBUG, "device=%p, format=%p", (void*)opensles, (void*)format);
-	WINPR_ASSERT(format);
 
 	switch (format->wFormatTag)
 	{
@@ -143,7 +142,6 @@ static UINT audin_opensles_set_format(IAudinDevice* device, const AUDIO_FORMAT* 
 
 	WLog_Print(opensles->log, WLOG_DEBUG, "device=%p, format=%p, FramesPerPacket=%" PRIu32 "",
 	           (void*)device, (void*)format, FramesPerPacket);
-	WINPR_ASSERT(format);
 
 	opensles->format = *format;
 
