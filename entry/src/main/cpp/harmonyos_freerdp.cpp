@@ -17,6 +17,8 @@
 #include <errno.h>
 #include <locale.h>
 #include <mutex>
+#include <vector>
+#include <dlfcn.h>
 #include <sys/mman.h>
 #include <poll.h>
 #include <unistd.h>
@@ -88,6 +90,8 @@ static inline UINT64 GetTickCount64_compat(void) {
 
 #define TAG "FreeRDP.HarmonyOS"
 
+#include <freerdp/codec/color.h>
+
 /* Forward declarations for internal functions defined later in this file */
 static bool freerdp_harmonyos_render_to_surface(rdpContext* context, int x1, int y1, int width, int height);
 static bool freerdp_harmonyos_render_to_surface_unlocked(rdpContext* context);
@@ -104,6 +108,8 @@ static OnGraphicsUpdateCallback g_onGraphicsUpdate = nullptr;
 static OnGraphicsResizeCallback g_onGraphicsResize = nullptr;
 static OnRemoteClipboardChangedCallback g_onRemoteClipboardChanged = nullptr;
 static OnCursorTypeChangedCallback g_onCursorTypeChanged = nullptr;
+static OnCursorShapeChangedCallback g_onCursorShapeChanged = nullptr;
+static OnFileOpenCallback g_onFileOpen = nullptr;
 static OnAuthenticateCallback g_onAuthenticate = nullptr;
 static OnVerifyCertificateCallback g_onVerifyCertificate = nullptr;
 
@@ -148,12 +154,158 @@ void harmonyos_set_cursor_type_changed_callback(OnCursorTypeChangedCallback call
     g_onCursorTypeChanged = callback;
 }
 
+void harmonyos_set_cursor_shape_changed_callback(OnCursorShapeChangedCallback callback) {
+    g_onCursorShapeChanged = callback;
+}
+
+/* ==================== File-open redirection (rdpdr observation hook) ====================
+ *
+ * The drive channel in libfreerdp-client3 exports
+ * ohos_freerdp_set_file_open_callback() only when built WITH
+ * WITH_OHOS_FILE_OPEN=ON. Resolve it with dlsym at registration time so this
+ * wrapper keeps working against builds with the option OFF (event simply
+ * never fires). */
+
+typedef void (*ohos_file_open_register_fn)(void (*)(int64_t, const char*, const char*));
+
+static void harmonyos_file_open_trampoline(int64_t instance, const char* fullPath,
+                                           const char* filename) {
+    if (g_onFileOpen)
+        g_onFileOpen(instance, fullPath, filename);
+}
+
+void harmonyos_set_file_open_callback(OnFileOpenCallback callback) {
+    g_onFileOpen = callback;
+
+    if (!callback)
+        return;
+
+    ohos_file_open_register_fn register_fn =
+        (ohos_file_open_register_fn)(uintptr_t)dlsym(RTLD_DEFAULT,
+                                                     "ohos_freerdp_set_file_open_callback");
+    if (!register_fn) {
+        LOGW("ohos_freerdp_set_file_open_callback not found "
+             "(libfreerdp-client3 built without WITH_OHOS_FILE_OPEN)");
+        return;
+    }
+    register_fn(harmonyos_file_open_trampoline);
+    LOGI("file-open redirection hook registered");
+}
+
 void harmonyos_set_authenticate_callback(OnAuthenticateCallback callback) {
     g_onAuthenticate = callback;
 }
 
 void harmonyos_set_verify_certificate_callback(OnVerifyCertificateCallback callback) {
     g_onVerifyCertificate = callback;
+}
+
+/*
+ * [Cursor shape sync] Extended rdpPointer carrying the decoded RGBA bitmap.
+ * Uses the standard client extension mechanism (cf. androidPointer in the
+ * Android client): harmonyos_register_pointer() sets pointer.size =
+ * sizeof(harmonyosPointer), so the framework allocates the extended struct
+ * for every pointer cache entry and casts it back in the callbacks.
+ */
+typedef struct {
+    rdpPointer pointer;
+    uint8_t* rgba;     /* width*height*4 bytes, byte order R,G,B,A; NULL = undecodable */
+    uint32_t rgbaLen;
+} harmonyosPointer;
+
+/* [IME heuristic] Visible-pixel count in one bitmap row (alpha >= 0x80).
+ * The decoded bitmap is ABGR32, i.e. bytes R,G,B,A per pixel. The 0x80
+ * threshold excludes the Windows cursor drop shadow (alpha ~50-100),
+ * which would otherwise inflate the bbox and row widths and break the
+ * serif-ratio classification below. */
+static UINT32 cursor_row_occupancy(const uint8_t* rgba, UINT32 width, UINT32 y) {
+    UINT32 count = 0;
+    for (UINT32 x = 0; x < width; x++) {
+        if (rgba[(y * width + x) * 4 + 3] >= 0x80)
+            count++;
+    }
+    return count;
+}
+
+/*
+ * [IME heuristic] Content-based classification for full-size cursor bitmaps.
+ * Windows sends its standard cursors as 32x32 images with a centered hotspot,
+ * so the geometry-only rules in identify_cursor_type() cannot tell IBEAM from
+ * WAIT/CROSS/SIZE there and everything falls into the CROSS/WAIT catch-alls.
+ * The UI layer relies on a reliable CURSOR_TYPE_IBEAM to auto-popup the soft
+ * keyboard when a text field is tapped, so classify by content instead:
+ *  - narrow & tall, widest rows at BOTH extremes -> IBEAM (serifs top+bottom;
+ *    serif rows only need >= 50% of the widest row: small/faint I-beams have
+ *    anti-aliased serifs barely half the widest row, while real resize
+ *    arrows have narrow tip rows (<50%) at the extremes and never match)
+ *  - narrow & tall, widest rows in the MIDDLE     -> UNKNOWN (mouse arrow)
+ *  - narrow & tall otherwise                     -> SIZE_NS
+ *  - wide & short                                -> SIZE_WE
+ */
+static int identify_cursor_content(harmonyosPointer* ptr) {
+    const UINT32 width = ptr->pointer.width;
+    const UINT32 height = ptr->pointer.height;
+    const uint8_t* rgba = ptr->rgba;
+
+    if (!rgba || ptr->rgbaLen < width * height * 4)
+        return CURSOR_TYPE_UNKNOWN;
+
+    UINT32 minX = width, minY = height, maxX = 0, maxY = 0;
+    for (UINT32 y = 0; y < height; y++) {
+        for (UINT32 x = 0; x < width; x++) {
+            if (rgba[(y * width + x) * 4 + 3] >= 0x80) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+        }
+    }
+    if (minX > maxX || minY > maxY)
+        return CURSOR_TYPE_UNKNOWN; /* fully transparent */
+
+    const UINT32 bboxW = maxX - minX + 1;
+    const UINT32 bboxH = maxY - minY + 1;
+    if (bboxW < 2 || bboxH < 4)
+        return CURSOR_TYPE_UNKNOWN;
+
+    UINT32 maxRow = 0, topRow = 0, bottomRow = 0;
+    for (UINT32 y = minY; y <= maxY; y++) {
+        const UINT32 occ = cursor_row_occupancy(rgba, width, y);
+        if (occ > maxRow) maxRow = occ;
+        if (y <= minY + 2 && occ > topRow) topRow = occ;
+        if (y + 2 >= maxY && occ > bottomRow) bottomRow = occ;
+    }
+    const UINT32 midRow = cursor_row_occupancy(rgba, width, (minY + maxY) / 2);
+
+    int result = CURSOR_TYPE_UNKNOWN;
+
+    /* narrow & tall: aspect ratio >= 1.6 and width <= half the canvas */
+    if (bboxH * 10 >= bboxW * 16 && bboxW * 2 <= width) {
+        const BOOL serifTop = (midRow * 2 <= topRow) && (topRow * 2 >= maxRow);
+        const BOOL serifBottom = (midRow * 2 <= bottomRow) && (bottomRow * 2 >= maxRow);
+        if (serifTop && serifBottom)
+            result = CURSOR_TYPE_IBEAM;
+        else if (midRow * 2 > topRow && midRow * 2 > bottomRow)
+            /* widest rows in the middle, narrow at both extremes: classic
+             * mouse-arrow profile (e.g. non-32x32 arrow variants on high-DPI
+             * remotes that the geometry rules cannot classify). NOT a resize
+             * handle - reporting SIZE_NS here misclassified the plain arrow. */
+            result = CURSOR_TYPE_UNKNOWN;
+        else
+            result = CURSOR_TYPE_SIZE_NS;
+    }
+    /* wide & short */
+    else if (bboxW * 10 >= bboxH * 16 && bboxH * 2 <= height)
+        result = CURSOR_TYPE_SIZE_WE;
+
+    static int lastLoggedContent = -1;
+    if (result != lastLoggedContent) {
+        lastLoggedContent = result;
+        LOGI("cursor content: bbox=%{public}ux%{public}u max=%{public}u top=%{public}u mid=%{public}u bot=%{public}u -> %{public}d",
+             bboxW, bboxH, maxRow, topRow, midRow, bottomRow, result);
+    }
+    return result;
 }
 
 /* Identify cursor type based on pointer properties */
@@ -184,7 +336,17 @@ static int identify_cursor_type(rdpPointer* pointer) {
         if (width > height * 1.2)
             return CURSOR_TYPE_SIZE_WE;
     }
-    
+
+    /* Full-size cursors (Windows standard cursors are 32x32 with centered
+     * hotspots): the geometry rules above cannot classify those, refine by
+     * bitmap content. Must run BEFORE the CROSS/WAIT catch-alls which would
+     * otherwise swallow IBEAM and break the soft-keyboard heuristic. */
+    {
+        const int content = identify_cursor_content((harmonyosPointer*)pointer);
+        if (content != CURSOR_TYPE_UNKNOWN)
+            return content;
+    }
+
     if (width >= 24 && height >= 24 && 
         xPos >= width/2 - 4 && xPos <= width/2 + 4 &&
         yPos >= height/2 - 4 && yPos <= height/2 + 4)
@@ -470,16 +632,81 @@ static BOOL harmonyos_pre_connect(freerdp* instance) {
 }
 
 /* Pointer handlers */
+/* (harmonyosPointer is defined next to identify_cursor_type above) */
+
+/* Last-delivered cursor shape (dedup: Windows re-Sets the same cached
+ * pointer constantly, e.g. when moving between windows) */
+static uint8_t* g_lastCursorRgba = nullptr;
+static uint32_t g_lastCursorLen = 0;
+static uint32_t g_lastCursorW = 0;
+static uint32_t g_lastCursorH = 0;
+static uint32_t g_lastCursorHX = 0;
+static uint32_t g_lastCursorHY = 0;
+static int g_lastCursorType = -1;
+/* Last cursor type already written to the device log (log dedup only) */
+static int g_lastLoggedCursorType = -1;
+
 static BOOL harmonyos_Pointer_New(rdpContext* context, rdpPointer* pointer) {
     /* 安全检查 */
     if (!context || !pointer || !context->gdi)
         return FALSE;
+
+    harmonyosPointer* ptr = (harmonyosPointer*)pointer;
+    ptr->rgba = NULL;
+    ptr->rgbaLen = 0;
+
+    /* Sanity bounds: standard pointers are 32x32, large-pointer capability
+     * allows up to 384x384. Out-of-range shapes keep the type-only fallback. */
+    if (pointer->width == 0 || pointer->height == 0 ||
+        pointer->width > 384 || pointer->height > 384)
+        return TRUE;
+
+    const uint32_t len = pointer->width * pointer->height * 4;
+    ptr->rgba = (uint8_t*)calloc(len, 1);
+    if (!ptr->rgba)
+        return TRUE; /* OOM: type-only fallback, do not break the session */
+
+    /*
+     * Pixel-perfect conversion of xor/and masks (handles 1/8/16/24/32 bpp
+     * xor data, transparency + inverted pixels, bottom-up rows) - same
+     * utility the X11/Wayland/SDL/Android clients use.
+     * PIXEL_FORMAT_ABGR32 yields byte order R,G,B,A which matches
+     * ArkTS image.PixelMapFormat.RGBA_8888.
+     */
+    if (!freerdp_image_copy_from_pointer_data(
+            ptr->rgba, PIXEL_FORMAT_ABGR32, 0, 0, 0, pointer->width, pointer->height,
+            pointer->xorMaskData, pointer->lengthXorMask, pointer->andMaskData,
+            pointer->lengthAndMask, pointer->xorBpp, &context->gdi->palette)) {
+        LOGW("cursor decode failed (%ux%u xorBpp=%u), fallback to type-only",
+             pointer->width, pointer->height, pointer->xorBpp);
+        free(ptr->rgba);
+        ptr->rgba = NULL;
+        return TRUE;
+    }
+    ptr->rgbaLen = len;
     return TRUE;
 }
 
 static void harmonyos_Pointer_Free(rdpContext* context, rdpPointer* pointer) {
     WINPR_UNUSED(context);
-    WINPR_UNUSED(pointer);
+    if (pointer) {
+        harmonyosPointer* ptr = (harmonyosPointer*)pointer;
+        free(ptr->rgba);
+        ptr->rgba = NULL;
+        ptr->rgbaLen = 0;
+    }
+}
+
+/* Send a "shape cleared" event (SetNull/SetDefault) and reset dedup state */
+static void harmonyos_clear_cursor_shape(freerdp* instance, int cursorType) {
+    free(g_lastCursorRgba);
+    g_lastCursorRgba = nullptr;
+    g_lastCursorLen = 0;
+    g_lastCursorType = cursorType;
+    g_lastCursorW = g_lastCursorH = g_lastCursorHX = g_lastCursorHY = 0;
+    if (instance && g_onCursorShapeChanged) {
+        g_onCursorShapeChanged((int64_t)(uintptr_t)instance, cursorType, 0, 0, 0, 0, NULL, 0);
+    }
 }
 
 static BOOL harmonyos_Pointer_Set(rdpContext* context, rdpPointer* pointer) {
@@ -488,10 +715,54 @@ static BOOL harmonyos_Pointer_Set(rdpContext* context, rdpPointer* pointer) {
         return FALSE;
 
     int cursorType = identify_cursor_type(pointer);
-    
+
+    /* Type transitions only (device-log diagnostics for the IME heuristic) */
+    if (cursorType != g_lastLoggedCursorType) {
+        g_lastLoggedCursorType = cursorType;
+        LOGI("Pointer_Set: cursor type=%{public}d size=%{public}ux%{public}u hotspot=(%{public}u,%{public}u)", cursorType,
+             pointer->width, pointer->height, pointer->xPos, pointer->yPos);
+    }
+
     freerdp* instance = context->instance;
+
+    /* Legacy type-only event (unchanged behaviour) */
     if (instance && g_onCursorTypeChanged) {
         g_onCursorTypeChanged((int64_t)(uintptr_t)instance, cursorType);
+    }
+
+    /* New shape event: type + bitmap + hotspot */
+    if (instance && g_onCursorShapeChanged) {
+        harmonyosPointer* ptr = (harmonyosPointer*)pointer;
+        const uint8_t* rgba = ptr->rgba;
+        const uint32_t len = ptr->rgbaLen;
+
+        bool changed = (len != g_lastCursorLen) || (cursorType != g_lastCursorType) ||
+                       (pointer->width != g_lastCursorW) || (pointer->height != g_lastCursorH) ||
+                       (pointer->xPos != g_lastCursorHX) || (pointer->yPos != g_lastCursorHY);
+        if (!changed && len > 0)
+            changed = (memcmp(rgba, g_lastCursorRgba, len) != 0);
+
+        if (changed) {
+            g_onCursorShapeChanged((int64_t)(uintptr_t)instance, cursorType,
+                                   (int)pointer->width, (int)pointer->height,
+                                   (int)pointer->xPos, (int)pointer->yPos, rgba, (int)len);
+
+            /* Refresh dedup snapshot (deep copy: the cache entry may be
+             * freed anytime after this callback returns) */
+            free(g_lastCursorRgba);
+            g_lastCursorRgba = nullptr;
+            if (len > 0) {
+                g_lastCursorRgba = (uint8_t*)malloc(len);
+                if (g_lastCursorRgba)
+                    memcpy(g_lastCursorRgba, rgba, len);
+            }
+            g_lastCursorLen = len;
+            g_lastCursorType = cursorType;
+            g_lastCursorW = pointer->width;
+            g_lastCursorH = pointer->height;
+            g_lastCursorHX = pointer->xPos;
+            g_lastCursorHY = pointer->yPos;
+        }
     }
 
     return TRUE;
@@ -513,6 +784,7 @@ static BOOL harmonyos_Pointer_SetNull(rdpContext* context) {
     if (instance && g_onCursorTypeChanged) {
         g_onCursorTypeChanged((int64_t)(uintptr_t)instance, CURSOR_TYPE_UNKNOWN);
     }
+    harmonyos_clear_cursor_shape(instance, CURSOR_TYPE_UNKNOWN);
     return TRUE;
 }
 
@@ -525,24 +797,27 @@ static BOOL harmonyos_Pointer_SetDefault(rdpContext* context) {
     if (instance && g_onCursorTypeChanged) {
         g_onCursorTypeChanged((int64_t)(uintptr_t)instance, CURSOR_TYPE_DEFAULT);
     }
+    harmonyos_clear_cursor_shape(instance, CURSOR_TYPE_DEFAULT);
     return TRUE;
 }
 
 static BOOL harmonyos_register_pointer(rdpGraphics* graphics) {
-    rdpPointer pointer;
-    memset(&pointer, 0, sizeof(rdpPointer));
+    harmonyosPointer pointer;
+    memset(&pointer, 0, sizeof(harmonyosPointer));
 
     if (!graphics)
         return FALSE;
 
-    pointer.size = sizeof(pointer);
-    pointer.New = harmonyos_Pointer_New;
-    pointer.Free = harmonyos_Pointer_Free;
-    pointer.Set = harmonyos_Pointer_Set;
-    pointer.SetNull = harmonyos_Pointer_SetNull;
-    pointer.SetDefault = harmonyos_Pointer_SetDefault;
-    pointer.SetPosition = harmonyos_Pointer_SetPosition;
-    graphics_register_pointer(graphics, &pointer);
+    /* Tell the framework to allocate the extended struct for every cache
+     * entry so the callbacks can cast rdpPointer* back to harmonyosPointer* */
+    pointer.pointer.size = sizeof(pointer);
+    pointer.pointer.New = harmonyos_Pointer_New;
+    pointer.pointer.Free = harmonyos_Pointer_Free;
+    pointer.pointer.Set = harmonyos_Pointer_Set;
+    pointer.pointer.SetNull = harmonyos_Pointer_SetNull;
+    pointer.pointer.SetDefault = harmonyos_Pointer_SetDefault;
+    pointer.pointer.SetPosition = harmonyos_Pointer_SetPosition;
+    graphics_register_pointer(graphics, &pointer.pointer);
     return TRUE;
 }
 
@@ -574,6 +849,11 @@ static BOOL harmonyos_post_connect(freerdp* instance) {
         LOGE("harmonyos_post_connect: settings is NULL");
         return FALSE;
     }
+
+    /* 能力协商后检查：服务端 input caps 会覆写 FreeRDP_UnicodeInput，
+     * 若为 0 则 input.c 会静默丢弃全部 Unicode 键事件（IME 输入落空的头号嫌疑） */
+    LOGI("harmonyos_post_connect: negotiated UnicodeInput=%{public}d",
+         freerdp_settings_get_bool(settings, FreeRDP_UnicodeInput) ? 1 : 0);
 
     LOGI("harmonyos_post_connect: Calling gdi_init...");
     if (!gdi_init(instance, PIXEL_FORMAT_RGBX32)) {

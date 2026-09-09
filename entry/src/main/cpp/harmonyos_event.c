@@ -146,7 +146,10 @@ bool harmonyos_check_handle(freerdp* instance) {
             case HARMONYOS_EVENT_TYPE_KEY: {
                 HARMONYOS_EVENT_KEY* keyEvent = (HARMONYOS_EVENT_KEY*)event;
                 if (input) {
-                    freerdp_input_send_keyboard_event(input, keyEvent->flags, keyEvent->scancode);
+                    if (!freerdp_input_send_keyboard_event(input, keyEvent->flags, keyEvent->scancode)) {
+                        LOGE("key event dropped by libfreerdp: scancode=%{public}u flags=%{public}u",
+                             (unsigned)keyEvent->scancode, (unsigned)keyEvent->flags);
+                    }
                 }
                 break;
             }
@@ -154,7 +157,14 @@ bool harmonyos_check_handle(freerdp* instance) {
             case HARMONYOS_EVENT_TYPE_UNICODEKEY: {
                 HARMONYOS_EVENT_UNICODEKEY* unicodeEvent = (HARMONYOS_EVENT_UNICODEKEY*)event;
                 if (input) {
-                    freerdp_input_send_unicode_keyboard_event(input, unicodeEvent->flags, unicodeEvent->character);
+                    if (!freerdp_input_send_unicode_keyboard_event(input, unicodeEvent->flags,
+                                                                  unicodeEvent->character)) {
+                        LOGE("unicode key dropped by libfreerdp: code=%{public}u flags=%{public}u",
+                             (unsigned)unicodeEvent->character, (unsigned)unicodeEvent->flags);
+                    } else {
+                        LOGI("unicode key sent: code=%{public}u flags=%{public}u",
+                             (unsigned)unicodeEvent->character, (unsigned)unicodeEvent->flags);
+                    }
                 }
                 break;
             }

@@ -141,6 +141,17 @@ typedef void (*OnGraphicsUpdateCallback)(int64_t instance, int x, int y, int wid
 typedef void (*OnGraphicsResizeCallback)(int64_t instance, int width, int height, int bpp);
 typedef void (*OnRemoteClipboardChangedCallback)(int64_t instance, const char* data);
 typedef void (*OnCursorTypeChangedCallback)(int64_t instance, int cursorType);
+/* Cursor shape event: full pointer bitmap decoded to RGBA8888 (byte order R,G,B,A).
+ * rgbaData/length are only valid during the callback; receivers must copy.
+ * length == 0 means "no custom shape" (SetNull/SetDefault): hide the overlay. */
+typedef void (*OnCursorShapeChangedCallback)(int64_t instance, int cursorType, int width,
+                                             int height, int hotspotX, int hotspotY,
+                                             const uint8_t* rgbaData, int length);
+/* File-open redirection event: server issued a plain read-only FILE_OPEN
+ * against the redirected drive (e.g. Explorer double-click). fullPath is the
+ * local filesystem path of the file; both strings are only valid during the
+ * callback. */
+typedef void (*OnFileOpenCallback)(int64_t instance, const char* fullPath, const char* filename);
 typedef bool (*OnAuthenticateCallback)(int64_t instance, char** username, char** domain, char** password);
 typedef int (*OnVerifyCertificateCallback)(int64_t instance, const char* host, int port,
                                            const char* commonName, const char* subject,
@@ -157,6 +168,8 @@ void harmonyos_set_graphics_update_callback(OnGraphicsUpdateCallback callback);
 void harmonyos_set_graphics_resize_callback(OnGraphicsResizeCallback callback);
 void harmonyos_set_remote_clipboard_changed_callback(OnRemoteClipboardChangedCallback callback);
 void harmonyos_set_cursor_type_changed_callback(OnCursorTypeChangedCallback callback);
+void harmonyos_set_cursor_shape_changed_callback(OnCursorShapeChangedCallback callback);
+void harmonyos_set_file_open_callback(OnFileOpenCallback callback);
 void harmonyos_set_authenticate_callback(OnAuthenticateCallback callback);
 void harmonyos_set_verify_certificate_callback(OnVerifyCertificateCallback callback);
 

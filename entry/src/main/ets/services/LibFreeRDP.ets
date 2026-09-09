@@ -21,6 +21,11 @@ interface FreerdpNative {
   setOnSettingsChanged(callback: (instance: number, width: number, height: number, bpp: number) => void): void;
   // 服务器动态调整桌面分辨率时 Native 上报（instance, width, height, bpp），随 setOnSettingsChanged 复用处理器。
   setOnGraphicsResize(callback: (instance: number, width: number, height: number, bpp: number) => void): void;
+  // 远端光标形态位图上报（instance, cursorType, width, height, hotspotX, hotspotY, rgba, length）。
+  // rgba 为 RGBA_8888 字节序（R,G,B,A）；length == 0 表示清除自定义光标（SetNull/SetDefault）。
+  setOnCursorShapeChanged(callback: (instance: number, cursorType: number, width: number, height: number, hotspotX: number, hotspotY: number, rgba: ArrayBuffer, length: number) => void): void;
+  // 远端通过重定向磁盘打开文件时上报（instance, fullPath, filename），fullPath 为本地沙箱路径。
+  setOnFileOpen(callback: (instance: number, fullPath: string, filename: string) => void): void;
   // 通过 Display Control 通道请求服务器调整桌面分辨率（旋转跟随）。
   freerdpRequestDesktopResize(inst: number, width: number, height: number): boolean;
   freerdpHasH264(): boolean;
@@ -72,6 +77,9 @@ let freerdpNative: FreerdpNative | null = null;
 // 模块级监听：native 侧只注册一次，业务层通过 set/clear 接管与释放（SDK 作用域语义）
 let settingsChangedCallback: ((instance: number, width: number, height: number, bpp: number) => void) | null = null;
 let graphicsResizeCallback: ((instance: number, width: number, height: number, bpp: number) => void) | null = null;
+let cursorShapeChangedCallback: ((instance: number, cursorType: number, width: number, height: number,
+  hotspotX: number, hotspotY: number, rgba: ArrayBuffer, length: number) => void) | null = null;
+let fileOpenCallback: ((instance: number, fullPath: string, filename: string) => void) | null = null;
 
 function resolveNativeModule(): FreerdpNative | null {
   if (freerdpNative) {
@@ -120,6 +128,7 @@ export const PTR_FLAGS_BUTTON2 = 0x2000;  // Right button
 export const PTR_FLAGS_BUTTON3 = 0x4000;  // Middle button
 export const PTR_FLAGS_WHEEL = 0x0200;
 export const PTR_FLAGS_WHEEL_NEGATIVE = 0x0100;
+export const PTR_FLAGS_HWHEEL = 0x0400;  // 与 native freerdp/input.h 保持一致
 
 // Event listener interface
 export interface EventListener {
@@ -292,6 +301,22 @@ function initCallbacks(nativeModule: FreerdpNative): void {
     console.info(`[LibFreeRDP] OnGraphicsResize: instance=${instance} ${width}x${height}@${bpp}`);
     if (graphicsResizeCallback) {
       graphicsResizeCallback(instance, width, height, bpp);
+    }
+  });
+
+  // 远端光标形态位图（含热点）；length == 0 表示清除自定义光标叠加层
+  nativeModule.setOnCursorShapeChanged((instance: number, cursorType: number, width: number,
+    height: number, hotspotX: number, hotspotY: number, rgba: ArrayBuffer, length: number) => {
+    if (cursorShapeChangedCallback) {
+      cursorShapeChangedCallback(instance, cursorType, width, height, hotspotX, hotspotY, rgba, length);
+    }
+  });
+
+  // 远端在重定向磁盘上打开文件（如资源管理器双击）
+  nativeModule.setOnFileOpen((instance: number, fullPath: string, filename: string) => {
+    console.info(`[LibFreeRDP] OnFileOpen: instance=${instance} file=${fullPath}`);
+    if (fileOpenCallback) {
+      fileOpenCallback(instance, fullPath, filename);
     }
   });
 
@@ -1019,6 +1044,36 @@ export class LibFreeRDP {
    */
   static clearOnGraphicsResize(): void {
     graphicsResizeCallback = null;
+  }
+
+  /**
+   * 注册"远端光标形态位图"监听；重复注册会覆盖前一个。
+   * rgba 为 RGBA_8888 字节序；length == 0 表示清除自定义光标叠加层。
+   */
+  static setOnCursorShapeChanged(callback: (instance: number, cursorType: number, width: number,
+    height: number, hotspotX: number, hotspotY: number, rgba: ArrayBuffer, length: number) => void): void {
+    cursorShapeChangedCallback = callback;
+  }
+
+  /**
+   * 释放"远端光标形态位图"监听（页面销毁时调用）。
+   */
+  static clearOnCursorShapeChanged(): void {
+    cursorShapeChangedCallback = null;
+  }
+
+  /**
+   * 注册"远端打开重定向磁盘文件"监听；重复注册会覆盖前一个。
+   */
+  static setOnFileOpen(callback: (instance: number, fullPath: string, filename: string) => void): void {
+    fileOpenCallback = callback;
+  }
+
+  /**
+   * 释放"远端打开重定向磁盘文件"监听（页面销毁时调用）。
+   */
+  static clearOnFileOpen(): void {
+    fileOpenCallback = null;
   }
 
   /**

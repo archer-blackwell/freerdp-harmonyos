@@ -46,6 +46,8 @@ static napi_threadsafe_function g_tsfnSettingsChanged = nullptr;
 static napi_threadsafe_function g_tsfnGraphicsUpdate = nullptr;
 static napi_threadsafe_function g_tsfnGraphicsResize = nullptr;
 static napi_threadsafe_function g_tsfnCursorTypeChanged = nullptr;
+static napi_threadsafe_function g_tsfnCursorShapeChanged = nullptr;
+static napi_threadsafe_function g_tsfnFileOpen = nullptr;
 
 // Mutex for protecting TSFN pointers
 static std::mutex g_tsfnMutex;
@@ -101,6 +103,28 @@ struct CallbackData {
     int32_t height = 0;
     int32_t bpp = 0;
     int32_t cursorType = 0;
+};
+
+/* Cursor shape event payload: ownership of rgbaData moves to the CallJS
+ * thread, which wraps it in an external ArrayBuffer and frees it in the
+ * finalizer. length == 0 means "clear overlay" (SetNull/SetDefault). */
+struct CursorShapeData {
+    int64_t instance;
+    int32_t cursorType = 0;
+    int32_t width = 0;
+    int32_t height = 0;
+    int32_t hotspotX = 0;
+    int32_t hotspotY = 0;
+    uint8_t* rgbaData = nullptr; /* heap deep-copy, byte order R,G,B,A */
+    int32_t length = 0;
+};
+
+/* File-open redirection event payload (strings deep-copied on the FreeRDP
+ * thread before posting) */
+struct FileOpenData {
+    int64_t instance;
+    std::string fullPath;
+    std::string filename;
 };
 
 // ==================== Thread-Safe Callbacks ====================
@@ -173,6 +197,76 @@ static void CallJS_CursorType(napi_env env, napi_value js_callback, void* contex
     napi_create_int32(env, cbData->cursorType, &args[1]);
     
     napi_call_function(env, global, js_callback, 2, args, &result);
+    delete cbData;
+}
+
+/* Finalizer freeing the cursor bitmap once ArkTS released the ArrayBuffer */
+static void CursorShapeArrayBufferFinalizer(napi_env env, void* data, void* hint) {
+    (void)env;
+    (void)hint;
+    free(data);
+}
+
+static void CallJS_CursorShape(napi_env env, napi_value js_callback, void* context, void* data) {
+    if (!env || !js_callback || !data) return;
+    CursorShapeData* cbData = static_cast<CursorShapeData*>(data);
+    napi_value global, result;
+    if (napi_get_global(env, &global) != napi_ok) {
+        free(cbData->rgbaData);
+        delete cbData;
+        return;
+    }
+
+    napi_value buffer = nullptr;
+    bool freed = false;
+    if (cbData->length > 0 && cbData->rgbaData) {
+        /* External ArrayBuffer: zero-copy, freed by the finalizer above */
+        if (napi_create_external_arraybuffer(env, cbData->rgbaData,
+                                             (size_t)cbData->length,
+                                             CursorShapeArrayBufferFinalizer, nullptr,
+                                             &buffer) != napi_ok) {
+            free(cbData->rgbaData);
+            freed = true;
+            buffer = nullptr;
+        }
+    }
+    if (!buffer) {
+        /* length == 0 (clear event) or allocation failure: empty buffer */
+        napi_create_arraybuffer(env, 0, nullptr, &buffer);
+        if (cbData->length > 0 && !freed)
+            free(cbData->rgbaData);
+    }
+    cbData->rgbaData = nullptr;
+
+    napi_value args[8];
+    napi_create_int64(env, cbData->instance, &args[0]);
+    napi_create_int32(env, cbData->cursorType, &args[1]);
+    napi_create_int32(env, cbData->width, &args[2]);
+    napi_create_int32(env, cbData->height, &args[3]);
+    napi_create_int32(env, cbData->hotspotX, &args[4]);
+    napi_create_int32(env, cbData->hotspotY, &args[5]);
+    args[6] = buffer;
+    napi_create_int32(env, cbData->length, &args[7]);
+
+    napi_call_function(env, global, js_callback, 8, args, &result);
+    delete cbData;
+}
+
+static void CallJS_FileOpen(napi_env env, napi_value js_callback, void* context, void* data) {
+    if (!env || !js_callback || !data) return;
+    FileOpenData* cbData = static_cast<FileOpenData*>(data);
+    napi_value global, result;
+    if (napi_get_global(env, &global) != napi_ok) {
+        delete cbData;
+        return;
+    }
+
+    napi_value args[3];
+    napi_create_int64(env, cbData->instance, &args[0]);
+    args[1] = CreateString(env, cbData->fullPath.c_str());
+    args[2] = CreateString(env, cbData->filename.c_str());
+
+    napi_call_function(env, global, js_callback, 3, args, &result);
     delete cbData;
 }
 
@@ -265,6 +359,46 @@ static void OnCursorTypeChangedImpl(int64_t instance, int cursorType) {
     CallbackData* data = new CallbackData{instance};
     data->cursorType = cursorType;
     napi_call_threadsafe_function(g_tsfnCursorTypeChanged, data, napi_tsfn_blocking);
+}
+
+static void OnCursorShapeChangedImpl(int64_t instance, int cursorType, int width, int height,
+                                     int hotspotX, int hotspotY, const uint8_t* rgbaData,
+                                     int length) {
+    std::lock_guard<std::mutex> lock(g_tsfnMutex);
+    if (!g_tsfnCursorShapeChanged) return;
+
+    /* The rgba buffer is only valid during this callback (wrapper may free
+     * the pointer cache entry right after) - deep-copy before posting. */
+    CursorShapeData* data = new CursorShapeData();
+    data->instance = instance;
+    data->cursorType = cursorType;
+    data->width = width;
+    data->height = height;
+    data->hotspotX = hotspotX;
+    data->hotspotY = hotspotY;
+    data->length = length;
+    if (length > 0 && rgbaData) {
+        data->rgbaData = (uint8_t*)malloc((size_t)length);
+        if (!data->rgbaData) {
+            delete data;
+            return; /* OOM: drop event, overlay keeps last shape */
+        }
+        memcpy(data->rgbaData, rgbaData, (size_t)length);
+    }
+    napi_call_threadsafe_function(g_tsfnCursorShapeChanged, data, napi_tsfn_blocking);
+}
+
+static void OnFileOpenImpl(int64_t instance, const char* fullPath, const char* filename) {
+    std::lock_guard<std::mutex> lock(g_tsfnMutex);
+    if (!g_tsfnFileOpen) return;
+
+    FileOpenData* data = new FileOpenData();
+    data->instance = instance;
+    if (fullPath)
+        data->fullPath = fullPath;
+    if (filename)
+        data->filename = filename;
+    napi_call_threadsafe_function(g_tsfnFileOpen, data, napi_tsfn_blocking);
 }
 
 // ==================== N-API Exported Functions ====================
@@ -940,6 +1074,24 @@ static napi_value SetOnCursorTypeChanged(napi_env env, napi_callback_info info) 
     return CreateTSFN(env, args[0], "OnCursorTypeChanged", CallJS_CursorType, &g_tsfnCursorTypeChanged);
 }
 
+static napi_value SetOnCursorShapeChanged(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    
+    harmonyos_set_cursor_shape_changed_callback(OnCursorShapeChangedImpl);
+    return CreateTSFN(env, args[0], "OnCursorShapeChanged", CallJS_CursorShape, &g_tsfnCursorShapeChanged);
+}
+
+static napi_value SetOnFileOpen(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    
+    harmonyos_set_file_open_callback(OnFileOpenImpl);
+    return CreateTSFN(env, args[0], "OnFileOpen", CallJS_FileOpen, &g_tsfnFileOpen);
+}
+
 // ==================== Module Registration ====================
 
 static napi_value Init(napi_env env, napi_value exports) {
@@ -1004,6 +1156,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         { "setOnGraphicsUpdate", nullptr, SetOnGraphicsUpdate, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setOnGraphicsResize", nullptr, SetOnGraphicsResize, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setOnCursorTypeChanged", nullptr, SetOnCursorTypeChanged, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "setOnCursorShapeChanged", nullptr, SetOnCursorShapeChanged, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "setOnFileOpen", nullptr, SetOnFileOpen, nullptr, nullptr, nullptr, napi_default, nullptr },
     };
     
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);

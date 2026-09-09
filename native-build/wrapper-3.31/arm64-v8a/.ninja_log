@@ -1,0 +1,15 @@
+# ninja log v6
+59	256	8104712530284298	CMakeFiles/freerdp_harmonyos.dir/harmonyos_jni_callback.c.o	102ac057a7e9ef5e
+9092	9348	8104712620613491	E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/entry/libs/arm64-v8a/libfreerdp_harmonyos.so	71851645f0dc8c3d
+81	478	8104712530504317	CMakeFiles/freerdp_harmonyos.dir/harmonyos_jni_utils.c.o	97abe2eb4501c82d
+43	972	8104712530124300	CMakeFiles/freerdp_harmonyos.dir/harmonyos_cliprdr.c.o	85feaf4b83c59cd4
+35	1083	8104712530054297	CMakeFiles/freerdp_harmonyos.dir/harmonyos_event.c.o	5831f7c00ccc86e8
+22	9091	8104712529924305	CMakeFiles/freerdp_harmonyos.dir/harmonyos_napi.cpp.o	67114a4e2b9202ab
+4	8517	8104712529744289	CMakeFiles/freerdp_harmonyos.dir/harmonyos_freerdp.cpp.o	f667b00606886bed
+94	1758	8104712530644308	CMakeFiles/freerdp_harmonyos.dir/freerdp_client_compat.c.o	95979c20852edeed
+214	664	8104787104272361	CMakeFiles/freerdp_harmonyos.dir/harmonyos_cliprdr.c.o	85feaf4b83c59cd4
+201	676	8104787104142386	CMakeFiles/freerdp_harmonyos.dir/harmonyos_event.c.o	5831f7c00ccc86e8
+230	910	8104787104422381	CMakeFiles/freerdp_harmonyos.dir/freerdp_client_compat.c.o	95979c20852edeed
+26	2449	8104787102391330	CMakeFiles/freerdp_harmonyos.dir/harmonyos_freerdp.cpp.o	f667b00606886bed
+166	2690	8104787103792380	CMakeFiles/freerdp_harmonyos.dir/harmonyos_napi.cpp.o	67114a4e2b9202ab
+2690	2899	8104787129028952	E:/HarmonyOs/Worker/ProjectFiles/freerdp-harmonyos/entry/libs/arm64-v8a/libfreerdp_harmonyos.so	71851645f0dc8c3d

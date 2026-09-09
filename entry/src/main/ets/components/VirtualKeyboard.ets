@@ -146,25 +146,33 @@ export interface VirtualKeyboardListener {
 export struct VirtualKeyboard {
   // Session instance
   @Prop instance: number = 0;
-  
+
+  // 面板显隐：由宿主页持有并传入，"关闭"按钮通过 @Link 回写
+  @Link showPanel: boolean;
+
+  // 请求宿主页切换系统输入法（软键盘手动入口，与特殊键面板互斥）
+  onImeRequest: () => void = () => {};
+
   // Keyboard type
   @State keyboardType: string = 'special';
-  
+
   // Modifier states
   @State ctrlActive: boolean = false;
   @State altActive: boolean = false;
   @State shiftActive: boolean = false;
   @State winActive: boolean = false;
-  
-  // Visibility
-  @State isVisible: boolean = false;
-  
+
   // Listener
   private listener: VirtualKeyboardListener | null = null;
-  
+
   // Key size
   private static readonly KEY_SIZE = 48;
   private static readonly KEY_MARGIN = 4;
+
+  aboutToDisappear(): void {
+    // 宿主直接卸载面板（非"关闭"按钮路径）时，释放仍按下的修饰键
+    this.releaseAllModifiers();
+  }
 
   /**
    * Set the event listener
@@ -174,31 +182,11 @@ export struct VirtualKeyboard {
   }
 
   /**
-   * Show the keyboard
+   * Close the panel and release modifiers
    */
-  show(type: string = 'special'): void {
-    this.keyboardType = type;
-    this.isVisible = true;
-  }
-
-  /**
-   * Hide the keyboard
-   */
-  hide(): void {
-    this.isVisible = false;
-    // Release all modifiers
+  close(): void {
+    this.showPanel = false;
     this.releaseAllModifiers();
-  }
-
-  /**
-   * Toggle visibility
-   */
-  toggle(type: string = 'special'): void {
-    if (this.isVisible && this.keyboardType === type) {
-      this.hide();
-    } else {
-      this.show(type);
-    }
   }
 
   /**
@@ -348,7 +336,7 @@ export struct VirtualKeyboard {
   }
 
   build() {
-    if (this.isVisible) {
+    if (this.showPanel) {
       Column() {
         // Keyboard type selector
         Row() {
@@ -358,27 +346,34 @@ export struct VirtualKeyboard {
             .backgroundColor(this.keyboardType === 'special' ? '#2196F3' : '#616161')
             .margin(4)
             .onClick(() => { this.keyboardType = 'special'; })
-          
+
           Button('方向键')
             .fontSize(12)
             .height(32)
             .backgroundColor(this.keyboardType === 'cursor' ? '#2196F3' : '#616161')
             .margin(4)
             .onClick(() => { this.keyboardType = 'cursor'; })
-          
+
           Button('修饰键')
             .fontSize(12)
             .height(32)
             .backgroundColor(this.keyboardType === 'modifiers' ? '#2196F3' : '#616161')
             .margin(4)
             .onClick(() => { this.keyboardType = 'modifiers'; })
-          
+
+          Button('输入法')
+            .fontSize(12)
+            .height(32)
+            .backgroundColor('#2196F3')
+            .margin(4)
+            .onClick(() => { this.onImeRequest(); })
+
           Button('关闭')
             .fontSize(12)
             .height(32)
             .backgroundColor('#F44336')
             .margin(4)
-            .onClick(() => { this.hide(); })
+            .onClick(() => { this.close(); })
         }
         .width('100%')
         .justifyContent(FlexAlign.Center)
