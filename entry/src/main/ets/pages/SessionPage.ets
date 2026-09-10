@@ -212,6 +212,8 @@ struct SessionPage {
   private imeTrackedValue: string = '';      // 已同步到远端的桥接框内容
   private imeLastPreview: string = '';       // 最近一次组合态 preview 文本（组合链跟踪）
   private imeLastComposeValue: string = '';  // 最近一次组合态桥接框全文
+  /** onWillDelete 否决删空后：若框架无视否决仍产生 onChange('')，跳过差分防双发 */
+  private imeVetoExpectedEmpty: boolean = false;
   private imeVisible: boolean = false;       // keyboardHeightChange 同步
   private imeCheckTimer: number = -1;
   private remoteCursorType: number = 0;      // 最近一次远端光标类型（CURSOR_TYPE_*）
@@ -605,7 +607,11 @@ struct SessionPage {
     }
 
     this.setupNativeSurface();
-    
+
+    /* 连接建立瞬间 surface 与桌面方向可能不一致（连接过程中旋转过手机）：
+     * 此刻才满足 CONNECTED 门禁，主动触发一次 resize 检查 */
+    this.maybeRequestDesktopResize();
+
     this.backgroundService = new RdpBackgroundService(this.context);
     await this.backgroundService.start();
     
@@ -627,6 +633,9 @@ struct SessionPage {
       this.session.updateDisplaySettings(width, height, bpp);
     }
     this.applyFitTransform();
+    /* 连接过程中旋转过手机时，协商桌面方向可能与 surface 不一致：
+     * 协商尺寸落定后立即检查是否需要 Display Control resize */
+    this.maybeRequestDesktopResize();
     /* 服务器已上报新分辨率：确认待处理的 resize 请求（生效则停止重试） */
     if (this.pendingResizeW > 0) {
       this.checkResizeResult();
@@ -1020,6 +1029,8 @@ struct SessionPage {
           // 不参与命中测试（不拦截会话触控），仅由 focusControl 程序化聚焦。
           // 非受控模式（不绑定 text 参数）：受控模式下组合态 onChange 不回写会导致
           // 框架将内部文本重置回参数值，静默取消输入法组合，之后不再产生任何事件。
+          // 删除走 onWillDelete 拦截：桥接框将删空时否决删除并手动补发远端退格，
+          // 字段永不清空 → 退格可无限删除桥接范围外（PC 端预输入）的内容。
           TextInput({ controller: this.imeInputController })
             .id('imeBridge')
             .key('imeBridge')
@@ -1032,6 +1043,19 @@ struct SessionPage {
             .hitTestBehavior(HitTestMode.None)
             .onChange((value: string, previewText?: PreviewText) => {
               this.onImeTextChanged(value, previewText);
+            })
+            .onWillDelete((value: DeleteValue): boolean => {
+              return this.onImeWillDelete(value);
+            })
+            .onWillInsert((value: InsertValue): boolean => {
+              console.info(`${TAG}: ime onWillInsert off=${value.insertOffset} value='${value.insertValue}'`);
+              return true;
+            })
+            .onDidInsert((value: InsertValue) => {
+              console.info(`${TAG}: ime onDidInsert off=${value.insertOffset} value='${value.insertValue}'`);
+            })
+            .onDidDelete((value: DeleteValue) => {
+              console.info(`${TAG}: ime onDidDelete off=${value.deleteOffset} len=${value.deleteValue.length}`);
             })
             .onEditChange((editing: boolean) => {
               console.info(`${TAG}: ime onEditChange -> ${editing}`);
@@ -1159,25 +1183,6 @@ struct SessionPage {
         .justifyContent(FlexAlign.Center)
       }
       
-      // [常驻输入法按钮] 工具栏连接 4 秒后自动隐藏且上游从未绑定唤出途径
-      // （toggleToolbar 无调用方），手动键盘入口必须在会话期间始终可见可点。
-      // 独立于会话 Stack 之外，点击不会穿透到远端。
-      if (this.connectionState === ConnectionState.CONNECTED) {
-        Button({ type: ButtonType.Circle }) {
-          Image($r('sys.media.ohos_ic_public_edit'))
-            .width(24)
-            .height(24)
-            .fillColor('#FFFFFF')
-        }
-        .width(44)
-        .height(44)
-        .backgroundColor('#66424242')
-        .position({ x: this.viewWidth - 56, y: this.viewHeight * 0.5 })
-        .onClick(() => {
-          this.toggleIme();
-        })
-      }
-
       if (this.showToolbar) {
         Column() {
           this.Toolbar()
@@ -1681,7 +1686,56 @@ struct SessionPage {
    * 携带 previewText，不能仅凭其非空一概丢弃。
    * 桥接框内容保留不清空，保证 IME 退格可继续删除远端已上屏内容。
    */
+  /**
+   * 删除拦截：桥接框即将被删空时否决本次删除，改为手动向远端补发等量退格。
+   * 框架被否决后删不掉最后的字符 → 字段永不清空 → 之后每次退格都触发本回调，
+   * 每按一次即向远端补一个退格，从而能删除桥接范围之外（PC 端预输入）的内容。
+   * 普通删除（不会清空）放行，由 onChange 差分同步退格。
+   */
+  private onImeWillDelete(value: DeleteValue): boolean {
+    const instance = this.session?.getInstance() ?? 0;
+    const trackedLen = this.imeTrackedValue.length;
+    console.info(`${TAG}: ime onWillDelete off=${value.deleteOffset} dir=${value.direction}` +
+      ` len=${value.deleteValue.length} tracked=${trackedLen}`);
+    if (trackedLen > 0 && value.deleteValue.length >= trackedLen) {
+      // 删空操作（整段选中删除 / 仅剩单字符退格）：否决并手动补发退格
+      if (instance !== 0) {
+        for (let i = 0; i < trackedLen; i++) {
+          if (!LibFreeRDP.sendKeyEvent(instance, SessionPage.VK_BACKSPACE, true) ||
+            !LibFreeRDP.sendKeyEvent(instance, SessionPage.VK_BACKSPACE, false)) {
+            console.error(`${TAG}: sendKeyEvent BACKSPACE failed`);
+            break;
+          }
+        }
+      }
+      console.info(`${TAG}: ime veto emptying delete, sent ${trackedLen} remote backspace(s)`);
+      this.imeVetoExpectedEmpty = true;
+      return false;
+    }
+    if (trackedLen === 0 && value.deleteValue.length === 0) {
+      // 空字段上的退格（若框架仍派发本回调）：远端补一个退格
+      if (instance !== 0) {
+        LibFreeRDP.sendKeyEvent(instance, SessionPage.VK_BACKSPACE, true);
+        LibFreeRDP.sendKeyEvent(instance, SessionPage.VK_BACKSPACE, false);
+      }
+      console.info(`${TAG}: ime backspace on empty bridge -> remote backspace`);
+      return false;
+    }
+    return true;
+  }
+
   private onImeTextChanged(value: string, previewText?: PreviewText): void {
+    // 否决失效兜底：若框架无视 onWillDelete 的 false 仍执行了删空操作，
+    // 此处会收到空值——退格已在回调中手动补发，跳过差分防止双发
+    if (value === '' && this.imeVetoExpectedEmpty) {
+      console.warn(`${TAG}: ime veto ignored by framework, skip diff`);
+      this.imeVetoExpectedEmpty = false;
+      this.imeTrackedValue = '';
+      return;
+    }
+    if (value !== '') {
+      this.imeVetoExpectedEmpty = false;
+    }
     // 全量插桩：每次 onChange 记录内容码点与组合态，用于定位组合后事件哑掉
     let codes = '';
     for (let i = 0; i < value.length && i < 32; i++) {
@@ -1749,14 +1803,17 @@ struct SessionPage {
 
   /**
    * 组合链判定：preview 是最近组合的自然演进（扩展/缩短/相等）或新组合
-   * 起点时视为组合态跳过；同起点内容整体变化（拼音选字替换）或空 preview
-   * 且全文有变（空格上屏）则按 commit 处理。
+   * 起点时视为组合态跳过；空 preview 仅在全文与已同步内容（tracked）一致
+   * 时跳过（组合结束信号），否则——选字上屏、退格删除到空、快捷短语
+   * finalize——一律按 commit 差分同步（差分幂等，无变化时为空操作）。
    */
   private isCompositionPreview(value: string, preview: string): boolean {
     const last = this.imeLastPreview;
     if (preview === '') {
-      // 空组合：全文与组合态一致 → 纯组合结束信号；有变 → 上屏
-      return value === this.imeLastComposeValue;
+      // 判据必须是 tracked（已同步内容）而非 imeLastComposeValue：
+      // 退格到空时 value=''+lastCompose='' 会被误判跳过，导致最后一词删不掉；
+      // 快捷短语"组合态插入→finalize"两步都会被吞，导致快捷输入失效
+      return value === this.imeTrackedValue;
     }
     if (last === '') {
       return true; // 新组合起点（英文键盘逐字母组合等）
